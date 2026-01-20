@@ -1,0 +1,64 @@
+# A股量化交易系统 - Python依赖
+
+# 数据获取
+akshare>=1.12.0
+tushare>=1.4.0
+
+# 量化框架
+QUANTAXIS>=1.10.0
+qlib>=0.9.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# 数据库
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+redis>=4.5.0
+pymongo>=4.3.0
+
+# 机器学习
+scikit-learn>=1.2.0
+lightgbm>=4.0.0
+xgboost>=2.0.0
+catboost>=1.2.0
+
+# 深度学习
+torch>=2.0.0
+pytorch-lightning>=2.0.0
+
+# 可视化
+matplotlib>=3.7.0
+plotly>=5.14.0
+streamlit>=1.28.0
+pyecharts>=2.0.0
+
+# 技术指标
+ta-lib>=0.4.25
+talib-binary>=0.4.25
+
+# Jupyter
+jupyterlab>=4.0.0
+ipywidgets>=8.0.0
+
+# 工具
+pyyaml>=6.0
+python-dotenv>=1.0.0
+loguru>=0.7.0
+rich>=13.0.0
+click>=8.1.0
+tqdm>=4.65.0
+
+# 任务调度
+apscheduler>=3.10.0
+
+# 测试
+pytest>=7.3.0
+pytest-cov>=4.1.0
+
+# 开发工具
+black>=23.3.0
+isort>=5.12.0
+mypy>=1.3.0

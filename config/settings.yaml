@@ -1,0 +1,86 @@
+# A股量化交易系统配置
+
+# 系统设置
+system:
+  name: "AQuantTrader"
+  version: "0.1.0"
+  debug: true
+  log_level: "INFO"
+
+# 数据源配置
+data_source:
+  # 主数据源: AKShare (免费)
+  primary: "akshare"
+  # 备用数据源: Tushare Pro (需要token)
+  secondary: "tushare"
+  
+  akshare:
+    enabled: true
+    cache_dir: "data/cache/akshare"
+    
+  tushare:
+    enabled: false
+    # token在secrets.yaml中配置
+    
+# 数据库配置
+database:
+  # PostgreSQL - 历史数据存储
+  postgresql:
+    enabled: false
+    host: "localhost"
+    port: 5432
+    database: "quant_db"
+    # 用户名密码在secrets.yaml中配置
+    
+  # Redis - 缓存
+  redis:
+    enabled: false
+    host: "localhost"
+    port: 6379
+    db: 0
+    
+  # SQLite - 轻量级本地存储 (默认)
+  sqlite:
+    enabled: true
+    path: "data/quant.db"
+
+# 回测配置
+backtest:
+  # 默认回测参数
+  initial_capital: 1000000  # 初始资金100万
+  commission_rate: 0.0003   # 佣金费率万三
+  stamp_duty: 0.001         # 印花税千一(卖出)
+  slippage: 0.001           # 滑点0.1%
+  
+  # 基准指数
+  benchmark: "000300"       # 沪深300
+  
+# 策略配置
+strategy:
+  # 默认持仓数量
+  max_positions: 20
+  # 单只股票最大仓位
+  max_single_position: 0.1  # 10%
+  # 止损阈值
+  stop_loss: -0.1           # -10%
+  # 止盈阈值  
+  take_profit: 0.3          # 30%
+
+# AI/ML配置
+ml:
+  # 模型存储路径
+  model_dir: "data/models"
+  # 特征缓存路径
+  feature_cache: "data/cache/features"
+  
+  # 默认模型参数
+  lightgbm:
+    n_estimators: 1000
+    learning_rate: 0.05
+    max_depth: 6
+    
+# Web界面配置
+web:
+  host: "0.0.0.0"
+  port: 8501
+  theme: "dark"
