@@ -16,6 +16,12 @@ from .factor_model import (
     FactorConfig,
     FactorBacktest
 )
+from .qlib_integration import (
+    QlibManager,
+    QlibConfig,
+    QlibAlphaStrategy,
+    FactorExpression
+)
 
 __all__ = [
     # ML Models
@@ -30,4 +36,10 @@ __all__ = [
     "AlphaFactorModel",
     "FactorConfig",
     "FactorBacktest",
+    # Qlib Integration
+    "QlibManager",
+    "QlibConfig",
+    "QlibAlphaStrategy",
+    "FactorExpression",
 ]
+
