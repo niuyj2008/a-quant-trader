@@ -26,16 +26,16 @@ except ImportError:
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
-except ImportError:
+except Exception as e:
     LIGHTGBM_AVAILABLE = False
-    logger.warning("LightGBM未安装")
+    logger.warning(f"LightGBM不可用 (可能是缺少libomp): {e}")
 
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
-except ImportError:
+except Exception as e:
     XGBOOST_AVAILABLE = False
-    logger.warning("XGBoost未安装")
+    logger.warning(f"XGBoost不可用 (可能是缺少libomp): {e}")
 
 
 @dataclass
@@ -332,7 +332,7 @@ class StockPredictor:
             return LightGBMModel()
         elif model_type == "xgboost":
             return XGBoostModel()
-        elif model_type == "random_forest":
+        elif model_type in ["random_forest", "randomforest"]:
             return RandomForestModel()
         else:
             raise ValueError(f"不支持的模型类型: {model_type}")

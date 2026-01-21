@@ -8,7 +8,10 @@ from .ml_models import (
     XGBoostModel,
     RandomForestModel,
     StockPredictor,
-    ModelMetrics
+    StockPredictor,
+    ModelMetrics,
+    LIGHTGBM_AVAILABLE,
+    XGBOOST_AVAILABLE
 )
 from .factor_model import (
     MultiFactorModel,
@@ -36,6 +39,8 @@ __all__ = [
     "RandomForestModel",
     "StockPredictor",
     "ModelMetrics",
+    "LIGHTGBM_AVAILABLE",
+    "XGBOOST_AVAILABLE",
     # Factor Models
     "MultiFactorModel",
     "AlphaFactorModel",
@@ -45,7 +50,6 @@ __all__ = [
     "QlibManager",
     "QlibConfig",
     "QlibAlphaStrategy",
-    "QlibAlphaStrategy",
     "FactorExpression",
     # Deep Learning Models
     "BaseDLModel",
@@ -53,7 +57,5 @@ __all__ = [
     "TransformerModel",
 ]
 
-# Training Pipeline
-from ..train_pipeline import TrainingPipeline
-__all__.append("TrainingPipeline")
+
 

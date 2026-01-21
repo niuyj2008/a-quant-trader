@@ -21,7 +21,8 @@ from src.data import DataFetcher
 from src.factors import FactorEngine
 from src.backtest import BacktestEngine, BacktestConfig
 from src.strategy import MACrossStrategy, MomentumStrategy
-from src.models import AlphaFactorModel, StockPredictor
+from src.models import AlphaFactorModel, StockPredictor, LIGHTGBM_AVAILABLE, XGBOOST_AVAILABLE
+from src.train_pipeline import TrainingPipeline
 
 # 页面配置
 st.set_page_config(
@@ -202,7 +203,7 @@ def main():
             st.session_state['refresh'] = True
     
     # 主内容区
-    tabs = st.tabs(["📊 行情分析", "🔬 因子研究", "📈 策略回测", "🤖 AI选股"])
+    tabs = st.tabs(["📊 行情分析", "🔬 因子研究", "📈 策略回测", "🤖 AI选股", "🧠 模型训练"])
     
     # Tab 1: 行情分析
     with tabs[0]:
@@ -377,8 +378,10 @@ def main():
                     except Exception as e:
                         st.error(f"回测失败: {e}")
     
+    
     # Tab 4: AI选股
     with tabs[3]:
+        # ... (AI选股内容保持不变) ...
         st.header("AI智能选股")
         
         col1, col2 = st.columns([1, 2])
@@ -397,10 +400,19 @@ def main():
                     ['均衡模型', '动量模型', '价值模型']
                 )
             else:
-                ml_model = st.selectbox(
-                    "ML模型",
-                    ['RandomForest', 'LightGBM', 'XGBoost']
-                )
+                ml_options = ['RandomForest']
+                if LIGHTGBM_AVAILABLE:
+                    ml_options.append('LightGBM')
+                if XGBOOST_AVAILABLE:
+                    ml_options.append('XGBoost')
+                    
+                ml_model = st.selectbox("ML模型", ml_options)
+                
+                if not LIGHTGBM_AVAILABLE or not XGBOOST_AVAILABLE:
+                    missing = []
+                    if not LIGHTGBM_AVAILABLE: missing.append("LightGBM")
+                    if not XGBOOST_AVAILABLE: missing.append("XGBoost")
+                    st.warning(f"注意: {', '.join(missing)} 未安装 (正在后台安装依赖)，当前仅显示可用模型")
             
             top_k = st.slider("选股数量", 3, 20, 10)
             
@@ -411,8 +423,13 @@ def main():
                 with st.spinner("AI选股中..."):
                     try:
                         # 准备数据
-                        codes = ['000001', '000002', '600000', '600036', '601398', 
-                                '601988', '600519', '000858', '002415', '000333']
+                        st.info("正在获取实时股票列表...")
+                        stock_list_df = fetch_stock_list()
+                        # 默认使用前20只股票作为演示池，避免全市场遍历耗时过长
+                        default_pool_size = 20
+                        codes = stock_list_df['code'].head(default_pool_size).tolist()
+                        
+                        st.write(f"正在分析 {len(codes)} 只股票 (来自实时市场列表)...")
                         
                         factor_engine = FactorEngine()
                         data = {}
@@ -469,6 +486,99 @@ def main():
                         
                     except Exception as e:
                         st.error(f"选股失败: {e}")
+
+    # Tab 5: 模型训练
+    with tabs[4]:
+        st.header("🧠 模型训练")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.subheader("配置训练参数")
+            
+            train_options = ['LSTM', 'Transformer', 'RandomForest']
+            if LIGHTGBM_AVAILABLE:
+                train_options.append('LightGBM')
+            if XGBOOST_AVAILABLE:
+                train_options.append('XGBoost')
+            
+            train_model_type = st.selectbox("模型类型", train_options)
+            
+            if not LIGHTGBM_AVAILABLE or not XGBOOST_AVAILABLE:
+                st.caption("安装完成后请点击下方按钮刷新")
+                if st.button("🔄 刷新依赖状态"):
+                    st.rerun()
+
+            epochs = st.number_input("训练轮数 (Epochs)", min_value=1, max_value=1000, value=10)
+            seq_len = st.number_input("序列长度 (Lookback)", min_value=1, max_value=60, value=10)
+            lr = st.number_input("学习率", min_value=0.0001, max_value=0.1, value=0.001, format="%.4f")
+            
+            st.subheader("特征选择")
+            feature_options = ['ma_5', 'ma_20', 'rsi_14', 'momentum_5', 'momentum_20', 'volatility_20']
+            selected_features = st.multiselect("训练特征", feature_options, default=['ma_5', 'ma_20', 'rsi_14'])
+            
+            start_train = st.button("🚀 开始训练", type="primary", use_container_width=True)
+            
+        with col2:
+            if start_train:
+                with st.spinner(f"正在训练 {train_model_type} 模型..."):
+                    try:
+                        # 1. 准备数据
+                        st.info("正在获取训练数据...")
+                        codes = ['000001', '000002', '600000', '600036', '601398', '601988']
+                        fetcher = DataFetcher()
+                        engine = FactorEngine()
+                        data_dict = {}
+                        
+                        progress_bar = st.progress(0)
+                        for i, code in enumerate(codes):
+                            try:
+                                df = fetcher.get_daily_data(code, start_date='2023-01-01')
+                                if not df.empty:
+                                    df = engine.compute(df, selected_features)
+                                    data_dict[code] = df
+                            except:
+                                pass
+                            progress_bar.progress((i + 1) / len(codes))
+                        
+                        if not data_dict:
+                            st.error("没有可用训练数据")
+                            st.stop()
+                            
+                        # 2. 训练管道
+                        st.info(f"开始训练流程 (Samples: {sum(len(df) for df in data_dict.values())})...")
+                        pipeline = TrainingPipeline(data_dir="data/models")
+                        
+                        if train_model_type in ['LSTM', 'Transformer']:
+                            metrics, path = pipeline.train_dl_model(
+                                data=data_dict, 
+                                feature_cols=selected_features,
+                                model_type=train_model_type.lower(),
+                                epochs=epochs,
+                                seq_len=seq_len
+                            )
+                        else:
+                            metrics, path = pipeline.train_ml_model(
+                                data=data_dict,
+                                feature_cols=selected_features,
+                                model_type=train_model_type.lower()
+                            )
+                        
+                        st.success("✅ 训练完成!")
+                        st.json({
+                            "模型路径": path,
+                            "状态": metrics,
+                            "参数": {
+                                "Epochs": epochs,
+                                "Seq Len": seq_len,
+                                "Features": len(selected_features)
+                            }
+                        })
+                        
+                    except Exception as e:
+                        st.error(f"训练失败: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
     
     # 页脚
     st.markdown("---")
