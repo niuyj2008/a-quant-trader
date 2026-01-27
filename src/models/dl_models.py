@@ -216,9 +216,12 @@ class TransformerModel(BaseDLModel):
             return output.cpu().numpy()
 
 if __name__ == "__main__":
-    # 简单测试
+    # ============================================================
+    # ⚠️ 以下仅为模块开发时的测试代码，不影响生产运行
+    # 实际使用时数据来自 DataFetcher，获取真实市场数据
+    # ============================================================
     if TORCH_AVAILABLE:
-        # 模拟数据: (batch=32, seq_len=10, features=5)
+        # 模拟数据: (batch=32, seq_len=10, features=5) - 仅用于测试模型结构
         X = np.random.randn(32, 10, 5).astype(np.float32)
         y = np.random.randn(32, 1).astype(np.float32)
         
