@@ -1,31 +1,23 @@
 """
-A股量化交易系统 - 交易模块
+股票量化策略决策支持系统 - 交易模块
 """
 
 from .paper_trading import PaperTradingEngine, Order, Position
 from .risk import RiskManager, RiskConfig, PositionRisk, PositionSizer
-from .vnpy_broker import (
-    BaseBroker, VnpyBroker, SimulatedBroker, LiveTrader,
-    BrokerConfig, OrderInfo, create_broker
-)
+from .trade_journal import TradeJournal
+
+# vnpy_broker 是可选依赖，不影响核心功能
+try:
+    from .vnpy_broker import (
+        BaseBroker, VnpyBroker, SimulatedBroker, LiveTrader,
+        BrokerConfig, OrderInfo, create_broker
+    )
+except Exception:
+    pass
 
 __all__ = [
-    # Paper Trading
-    "PaperTradingEngine",
-    "Order",
-    "Position",
-    # Risk Management
-    "RiskManager",
-    "RiskConfig",
-    "PositionRisk",
-    "PositionSizer",
-    # VeighNa Broker
-    "BaseBroker",
-    "VnpyBroker",
-    "SimulatedBroker",
-    "LiveTrader",
-    "BrokerConfig",
-    "OrderInfo",
-    "create_broker",
+    "PaperTradingEngine", "Order", "Position",
+    "RiskManager", "RiskConfig", "PositionRisk", "PositionSizer",
+    "TradeJournal",
 ]
 

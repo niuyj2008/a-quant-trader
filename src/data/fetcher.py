@@ -1,12 +1,13 @@
 """
-A股量化交易系统 - 数据获取模块
+股票量化策略决策支持系统 - 数据获取模块（增强版）
 
-提供统一的数据获取接口，支持多数据源切换
+支持多数据源切换、周线聚合、基本面/宏观/情绪数据获取
 """
 
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
-from typing import Optional, List, Union
+from typing import Optional, List, Dict, Union
 from loguru import logger
 
 try:
@@ -27,417 +28,623 @@ except ImportError:
     yf = None
     logger.warning("yfinance未安装，美股数据功能不可用")
 
+from src.data.data_cache import DataCache
+
 
 class DataFetcher:
-    """统一数据获取器"""
-    
-    def __init__(self, source: str = "akshare", tushare_token: Optional[str] = None):
+    """统一数据获取器（增强版）"""
+
+    def __init__(self, source: str = "akshare", tushare_token: Optional[str] = None,
+                 use_cache: bool = True):
         """
         初始化数据获取器
-        
+
         Args:
             source: 数据源 ("akshare" 或 "tushare")
             tushare_token: Tushare Pro token
+            use_cache: 是否启用本地缓存
         """
         self.source = source
-        
+        self.use_cache = use_cache
+        self.cache = DataCache() if use_cache else None
+
         if source == "tushare" and tushare_token:
             if ts:
                 ts.set_token(tushare_token)
                 self.pro = ts.pro_api()
             else:
                 raise ImportError("Tushare未安装，请运行: pip install tushare")
-    
-    def get_stock_list(self) -> pd.DataFrame:
-        """
-        获取A股股票列表
-        
-        Returns:
-            DataFrame with columns: code, name, market, list_date
-        """
+
+    # ==================== 股票列表 ====================
+
+    def get_stock_list(self, market: str = "CN") -> pd.DataFrame:
+        """获取股票列表"""
+        if market == "US":
+            return self._get_us_stock_list()
         if self.source == "akshare":
             return self._get_stock_list_akshare()
         else:
             return self._get_stock_list_tushare()
-    
+
     def _get_stock_list_akshare(self) -> pd.DataFrame:
-        """使用AKShare获取股票列表"""
+        """使用AKShare获取A股股票列表"""
         if ak is None:
             raise ImportError("AKShare未安装")
-        
-        # 获取沪深A股实时行情，从中提取股票列表
         df = ak.stock_zh_a_spot_em()
-        
         result = pd.DataFrame({
             'code': df['代码'],
             'name': df['名称'],
             'market': df['代码'].apply(lambda x: 'SH' if x.startswith('6') else 'SZ'),
         })
-        
         return result
-    
+
     def _get_stock_list_tushare(self) -> pd.DataFrame:
         """使用Tushare获取股票列表"""
-        df = self.pro.stock_basic(
-            exchange='',
-            list_status='L',
-            fields='ts_code,symbol,name,market,list_date'
-        )
-        
+        df = self.pro.stock_basic(exchange='', list_status='L',
+                                  fields='ts_code,symbol,name,market,list_date')
         result = pd.DataFrame({
-            'code': df['symbol'],
-            'name': df['name'],
-            'market': df['market'],
-            'list_date': df['list_date']
+            'code': df['symbol'], 'name': df['name'],
+            'market': df['market'], 'list_date': df['list_date']
         })
-        
         return result
-    
-    def get_daily_data(
-        self,
-        code: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        adjust: str = "qfq",
-        market: str = "CN"
-    ) -> pd.DataFrame:
-        """
-        获取日线数据
-        
-        Args:
-            code: 股票代码 (如 "000001")
-            start_date: 开始日期 (YYYY-MM-DD)
-            end_date: 结束日期 (YYYY-MM-DD)
-            adjust: 复权类型 ("qfq"前复权, "hfq"后复权, ""不复权)
-            
-        Returns:
-            DataFrame with OHLCV data
-        """
+
+    def _get_us_stock_list(self) -> pd.DataFrame:
+        """美股精选列表"""
+        from src.data.market import get_stock_pool
+        codes = get_stock_pool("US")
+        return pd.DataFrame({'code': codes, 'name': codes, 'market': 'US'})
+
+    # ==================== 日线数据 ====================
+
+    def get_daily_data(self, code: str, start_date: Optional[str] = None,
+                       end_date: Optional[str] = None, adjust: str = "qfq",
+                       market: str = "CN") -> pd.DataFrame:
+        """获取日线数据（带缓存）"""
+        # 尝试缓存
+        if self.use_cache and self.cache:
+            cached = self.cache.load_daily(code, start_date, end_date, market)
+            if not cached.empty:
+                logger.debug(f"缓存命中: {market}/{code} {len(cached)}条")
+                return cached
+
+        # 从数据源获取
         if market == "US":
-            return self._get_daily_us(code, start_date, end_date)
-            
-        if self.source == "akshare":
-            return self._get_daily_akshare(code, start_date, end_date, adjust)
+            df = self._get_daily_us(code, start_date, end_date)
+        elif self.source == "akshare":
+            df = self._get_daily_akshare(code, start_date, end_date, adjust)
         else:
-            return self._get_daily_tushare(code, start_date, end_date, adjust)
-    
-    def _get_daily_akshare(
-        self,
-        code: str,
-        start_date: Optional[str],
-        end_date: Optional[str],
-        adjust: str
-    ) -> pd.DataFrame:
+            df = self._get_daily_tushare(code, start_date, end_date, adjust)
+
+        # 写入缓存
+        if self.use_cache and self.cache and not df.empty:
+            self.cache.save_daily(code, df, market)
+
+        return df
+
+    def _get_daily_akshare(self, code: str, start_date: Optional[str],
+                           end_date: Optional[str], adjust: str) -> pd.DataFrame:
         """使用AKShare获取日线数据，支持异常重试和备用源"""
         if ak is None:
             raise ImportError("AKShare未安装")
-        
-        # 转换复权类型
         adjust_map = {"qfq": "qfq", "hfq": "hfq", "": ""}
         ak_adjust = adjust_map.get(adjust, "qfq")
-        
+
         try:
             df = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
+                symbol=code, period="daily",
                 start_date=start_date.replace("-", "") if start_date else "19900101",
                 end_date=end_date.replace("-", "") if end_date else datetime.now().strftime("%Y%m%d"),
                 adjust=ak_adjust
             )
-            
-            # 标准化列名
             result = pd.DataFrame({
                 'date': pd.to_datetime(df['日期']),
-                'open': df['开盘'],
-                'high': df['最高'],
-                'low': df['最低'],
-                'close': df['收盘'],
-                'volume': df['成交量'],
-                'amount': df['成交额'],
+                'open': df['开盘'], 'high': df['最高'],
+                'low': df['最低'], 'close': df['收盘'],
+                'volume': df['成交量'], 'amount': df['成交额'],
                 'turnover': df.get('换手率', 0),
             })
-            
             result.set_index('date', inplace=True)
             return result
         except Exception as e:
-            logger.warning(f"AKShare 获取 {code} 失败: {e}. 尝试使用 yfinance 备用源...")
-            
-            # 构造 yfinance 格式代码
+            logger.warning(f"AKShare 获取 {code} 失败: {e}. 尝试yfinance备用源...")
             if code.startswith('6'):
                 yf_code = f"{code}.SS"
             elif code.startswith(('0', '3')):
                 yf_code = f"{code}.SZ"
-            elif code.startswith(('8', '4')):
-                yf_code = f"{code}.BJ"
             else:
                 yf_code = code
-                
             try:
-                # yfinance 默认返回的就是前复权数据 (Close 是复权后的)
                 fallback_df = self._get_daily_us(yf_code, start_date, end_date)
                 if not fallback_df.empty:
-                    logger.info(f"成功使用 yfinance 获取 {code} 数据")
-                    # yfinance 数据列名已在 _get_daily_us 中标准化
-                    # 添加缺失的 amount 和 turnover 为 0 保持兼容
                     fallback_df['amount'] = 0
                     fallback_df['turnover'] = 0
                     return fallback_df
             except Exception as fe:
                 logger.error(f"所有数据源获取 {code} 均失败: {fe}")
-            
             raise e
-    
-    def _get_daily_tushare(
-        self,
-        code: str,
-        start_date: Optional[str],
-        end_date: Optional[str],
-        adjust: str
-    ) -> pd.DataFrame:
+
+    def _get_daily_tushare(self, code: str, start_date: Optional[str],
+                           end_date: Optional[str], adjust: str) -> pd.DataFrame:
         """使用Tushare获取日线数据"""
-        # 确定交易所后缀
         suffix = ".SH" if code.startswith("6") else ".SZ"
         ts_code = code + suffix
-        
-        # 转换日期格式
         start = start_date.replace("-", "") if start_date else None
         end = end_date.replace("-", "") if end_date else None
-        
-        df = ts.pro_bar(
-            ts_code=ts_code,
-            start_date=start,
-            end_date=end,
-            adj=adjust if adjust else None
-        )
-        
+        df = ts.pro_bar(ts_code=ts_code, start_date=start, end_date=end,
+                        adj=adjust if adjust else None)
         if df is None or df.empty:
             return pd.DataFrame()
-        
         result = pd.DataFrame({
             'date': pd.to_datetime(df['trade_date']),
-            'open': df['open'],
-            'high': df['high'],
-            'low': df['low'],
-            'close': df['close'],
-            'volume': df['vol'],
-            'amount': df['amount'],
+            'open': df['open'], 'high': df['high'],
+            'low': df['low'], 'close': df['close'],
+            'volume': df['vol'], 'amount': df['amount'],
         })
-        
         result.set_index('date', inplace=True)
         result.sort_index(inplace=True)
+        return result
+
+    def _get_daily_us(self, code: str, start_date: Optional[str],
+                      end_date: Optional[str]) -> pd.DataFrame:
+        """使用yfinance获取美股日线数据"""
+        if yf is None:
+            raise ImportError("yfinance未安装")
+        df = yf.download(code, start=start_date, end=end_date, progress=False)
+        if df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            try:
+                if len(df.columns.levels) > 1:
+                    df.columns = df.columns.droplevel(1)
+            except Exception:
+                pass
+        df.columns = [str(c).lower() for c in df.columns]
+        df.index.name = 'date'
+        result = pd.DataFrame({
+            'open': df['open'], 'high': df['high'],
+            'low': df['low'], 'close': df['close'],
+            'volume': df['volume']
+        })
+        return result
+
+    # ==================== 周线数据 ====================
+
+    def get_weekly_data(self, code: str, start_date: Optional[str] = None,
+                        end_date: Optional[str] = None, market: str = "CN") -> pd.DataFrame:
+        """
+        获取周线数据（从日线聚合）
+
+        Returns:
+            DataFrame with weekly OHLCV, indexed by week ending date (Friday)
+        """
+        daily = self.get_daily_data(code, start_date, end_date, market=market)
+        if daily.empty:
+            return pd.DataFrame()
+        return self.aggregate_to_weekly(daily)
+
+    @staticmethod
+    def aggregate_to_weekly(daily_df: pd.DataFrame) -> pd.DataFrame:
+        """将日线数据聚合为周线"""
+        weekly = daily_df.resample('W-FRI').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum',
+        })
+        # 可选列
+        if 'amount' in daily_df.columns:
+            weekly['amount'] = daily_df['amount'].resample('W-FRI').sum()
+        if 'turnover' in daily_df.columns:
+            weekly['turnover'] = daily_df['turnover'].resample('W-FRI').mean()
+        weekly.dropna(subset=['open'], inplace=True)
+        return weekly
+
+    # ==================== 10年长期数据 ====================
+
+    def get_long_history(self, code: str, years: int = 10,
+                         market: str = "CN") -> pd.DataFrame:
+        """获取长期历史数据（默认10年）"""
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
+        return self.get_daily_data(code, start_date, end_date, market=market)
+
+    # ==================== 基本面数据 ====================
+
+    def get_financial_data(self, code: str, market: str = "CN") -> Dict:
+        """
+        获取股票基本面数据
+
+        Returns:
+            Dict with pe, pb, roe, revenue_growth, gross_margin, etc.
+        """
+        if market == "US":
+            return self._get_financial_us(code)
+        return self._get_financial_cn(code)
+
+    def _get_financial_cn(self, code: str) -> Dict:
+        """获取A股基本面数据"""
+        result = {}
+        if ak is None:
+            return result
+        try:
+            # 实时行情中包含PE/PB
+            df = ak.stock_zh_a_spot_em()
+            row = df[df['代码'] == code]
+            if not row.empty:
+                row = row.iloc[0]
+                result['pe'] = float(row.get('市盈率-动态', 0)) if pd.notna(row.get('市盈率-动态')) else None
+                result['pb'] = float(row.get('市净率', 0)) if pd.notna(row.get('市净率')) else None
+                result['market_cap'] = float(row.get('总市值', 0)) if pd.notna(row.get('总市值')) else None
+                result['turnover_rate'] = float(row.get('换手率', 0)) if pd.notna(row.get('换手率')) else None
+        except Exception as e:
+            logger.warning(f"获取A股基本面数据失败: {e}")
+
+        try:
+            # 财务指标
+            fin_df = ak.stock_financial_abstract_ths(symbol=code, indicator="按年度")
+            if fin_df is not None and not fin_df.empty:
+                latest = fin_df.iloc[0]
+                result['roe'] = self._safe_float(latest, '净资产收益率')
+                result['gross_margin'] = self._safe_float(latest, '销售毛利率')
+                result['revenue_growth'] = self._safe_float(latest, '营业总收入同比增长率')
+                result['net_profit_growth'] = self._safe_float(latest, '净利润同比增长率')
+        except Exception as e:
+            logger.debug(f"获取财务摘要失败（可忽略）: {e}")
+
+        return result
+
+    def _get_financial_us(self, code: str) -> Dict:
+        """获取美股基本面数据"""
+        result = {}
+        if yf is None:
+            return result
+        try:
+            ticker = yf.Ticker(code)
+            info = ticker.info
+            result['pe'] = info.get('trailingPE')
+            result['pb'] = info.get('priceToBook')
+            result['roe'] = info.get('returnOnEquity')
+            result['revenue_growth'] = info.get('revenueGrowth')
+            result['gross_margin'] = info.get('grossMargins')
+            result['market_cap'] = info.get('marketCap')
+            result['debt_ratio'] = info.get('debtToEquity')
+        except Exception as e:
+            logger.warning(f"获取美股基本面数据失败: {e}")
+        return result
+
+    # ==================== 宏观经济数据 ====================
+
+    def get_macro_data(self) -> Dict[str, pd.Series]:
+        """
+        获取中国宏观经济指标
         
+        Returns:
+            Dict of indicator_name -> pd.Series(date -> value)
+        """
+        result = {}
+        if ak is None:
+            return result
+
+        # GDP
+        try:
+            df = ak.macro_china_gdp()
+            if df is not None and not df.empty:
+                # 过滤并解析日期: "2023年第4季度" -> 2023-12-31
+                # 使用列名 '季度' 更安全
+                date_col = '季度' if '季度' in df.columns else df.columns[0]
+                df['date'] = df[date_col].apply(self._parse_chinese_quarter)
+                df.dropna(subset=['date'], inplace=True)
+                # 数据通常在第2列 (国内生产总值-绝对值) 或 第3列 (同比增长)
+                # 这里取第2列作为 GDP 数值
+                s = pd.Series(df.iloc[:, 1].values, index=df['date'])
+                result['gdp'] = s.sort_index()
+        except Exception as e:
+            logger.debug(f"GDP数据获取失败: {e}")
+
+        # CPI
+        try:
+            df = ak.macro_china_cpi_monthly()
+            if df is not None and not df.empty:
+                # CPI 日期在 '日期' 列 (第2列)
+                date_col = '日期' if '日期' in df.columns else df.columns[1]
+                df['date'] = df[date_col].apply(self._parse_chinese_month)
+                df.dropna(subset=['date'], inplace=True)
+                # 数据在 '今值' (current value)
+                val_col = '今值' if '今值' in df.columns else df.columns[2]
+                s = pd.Series(df[val_col].values, index=df['date'])
+                result['cpi'] = s.sort_index()
+        except Exception as e:
+            logger.debug(f"CPI数据获取失败: {e}")
+
+        # PMI
+        try:
+            df = ak.macro_china_pmi()
+            if df is not None and not df.empty:
+                date_col = '月份' if '月份' in df.columns else df.columns[0]
+                df['date'] = df[date_col].apply(self._parse_chinese_month)
+                df.dropna(subset=['date'], inplace=True)
+                # 制造业数据 usually column 1
+                s = pd.Series(df.iloc[:, 1].values, index=df['date'])
+                result['pmi'] = s.sort_index()
+        except Exception as e:
+            logger.debug(f"PMI数据获取失败: {e}")
+
+        # M2
+        try:
+            df = ak.macro_china_money_supply()
+            if df is not None and not df.empty:
+                date_col = '月份' if '月份' in df.columns else df.columns[0]
+                df['date'] = df[date_col].apply(self._parse_chinese_month)
+                df.dropna(subset=['date'], inplace=True)
+                for col in df.columns:
+                    if 'M2' in str(col) and '同比增长' in str(col):
+                         # 优先取同比增长
+                         s = pd.Series(df[col].values, index=df['date'])
+                         result['m2'] = s.sort_index()
+                         break
+                if 'm2' not in result:
+                    # Fallback to any M2 column
+                     for col in df.columns:
+                        if 'M2' in str(col):
+                            s = pd.Series(df[col].values, index=df['date'])
+                            result['m2'] = s.sort_index()
+                            break
+        except Exception as e:
+            logger.debug(f"M2数据获取失败: {e}")
+
+        return result
+
+    # ==================== 市场情绪数据 ====================
+
+    def get_sentiment_data(self, market: str = "CN") -> Dict:
+        """获取市场情绪指标"""
+        result = {}
+        if market == "US":
+            return self._get_sentiment_us()
+        return self._get_sentiment_cn()
+
+    def _get_sentiment_cn(self) -> Dict:
+        """A股情绪数据"""
+        result = {}
+        if ak is None:
+            return result
+
+        # 融资融券余额 (沪深总和)
+        try:
+            # 分别获取沪市和深市数据并合并
+            # 注意: 若AKShare接口返回异常或数据为空，需做容错
+            try:
+                sh_margin = ak.stock_margin_sse(start_date="20240101")
+            except Exception:
+                sh_margin = pd.DataFrame()
+            
+            try:
+                sz_margin = ak.stock_margin_szse(start_date="20240101")
+            except Exception:
+                sz_margin = pd.DataFrame()
+            
+            if not sh_margin.empty and not sz_margin.empty:
+                # 统一列名并按日期索引
+                sh_margin['date'] = pd.to_datetime(sh_margin.iloc[:, 0], errors='coerce')
+                sz_margin['date'] = pd.to_datetime(sz_margin.iloc[:, 0], errors='coerce')
+                
+                sh_margin.set_index('date', inplace=True)
+                sz_margin.set_index('date', inplace=True)
+                
+                # 合并
+                common_dates = sh_margin.index.intersection(sz_margin.index)
+                if not common_dates.empty:
+                    # 尝试按位置获取融资买入额 (通常是第2列)
+                    sh_buy = sh_margin.iloc[:, 2] if len(sh_margin.columns) > 2 else sh_margin.iloc[:, 1]
+                    sz_buy = sz_margin.iloc[:, 1] if len(sz_margin.columns) > 1 else sz_margin.iloc[:, 0]
+                    
+                    total_buy = sh_buy.reindex(common_dates).fillna(0) + sz_buy.reindex(common_dates).fillna(0)
+                    
+                    # 构造 DataFrame
+                    df = pd.DataFrame({'融资买入额': total_buy})
+                    result['margin_balance'] = df
+        except Exception as e:
+            logger.debug(f"融资融券数据获取失败: {e}")
+
+        # 北向资金
+        try:
+            df = ak.stock_hsgt_hist_em(symbol="北向资金")
+            if df is not None and not df.empty:
+                # 列: 日期, 当日成交净买入额 -> 改为 '当日成交净买额'
+                df['date'] = pd.to_datetime(df['日期'])
+                df.set_index('date', inplace=True)
+                
+                # 映射列名
+                rename_map = {
+                    '当日成交净买额': 'north_money',
+                    '当日成交净买入额': 'north_money'  # 兼容旧名
+                }
+                df.rename(columns=rename_map, inplace=True)
+                
+                if 'north_money' in df.columns:
+                    # 过滤掉 NaN 值 (某些接口返回未来日期的空行)
+                    df.dropna(subset=['north_money'], inplace=True)
+                    if not df.empty:
+                        result['northbound_flow'] = df
+        except Exception as e:
+            logger.debug(f"北向资金数据获取失败: {e}")
+
+        return result
+
+    def _get_sentiment_us(self) -> Dict:
+        """美股情绪数据 - VIX & 10Y Yield"""
+        result = {}
+        try:
+            if yf:
+                # VIX
+                try:
+                    vix = yf.download("^VIX", period="1y", progress=False)
+                    if not vix.empty:
+                        result['vix'] = vix
+                    else:
+                        result['debug_vix_empty'] = "True"
+                except Exception as e:
+                    result['debug_vix_error'] = str(e)
+                
+                # 10Y Treasury Yield
+                try:
+                    tnx = yf.download("^TNX", period="1y", progress=False)
+                    if not tnx.empty:
+                        result['us_yield'] = tnx
+                    else:
+                        result['debug_tnx_empty'] = "True"
+                except Exception as e:
+                    result['debug_tnx_error'] = str(e)
+            else:
+                result['debug_yf_missing'] = "True"
+        except Exception as e:
+            logger.debug(f"美股情绪/宏观数据获取失败: {e}")
+            result['debug_global_error'] = str(e)
         return result
     
-    def get_realtime_quotes(self, codes: Optional[List[str]] = None) -> pd.DataFrame:
-        """
-        获取实时行情数据
-        
-        Args:
-            codes: 股票代码列表，为None时获取全部A股
-            
-        Returns:
-            DataFrame with realtime quotes
-        """
-        if codes and len(codes) > 0 and codes[0].isalpha(): # 假设由字母组成的为美股代码
-             return self._get_realtime_us(codes)
+    # ==================== 日期解析辅助 ====================
 
+    @staticmethod
+    def _parse_chinese_quarter(date_str: str):
+        """解析 '2025年第1季度' -> datetime"""
+        try:
+            if not isinstance(date_str, str): return None
+            import re
+            m = re.match(r'(\d{4})年第(\d)季度', date_str)
+            if m:
+                year, q = int(m.group(1)), int(m.group(2))
+                # 设置为季度末
+                month = q * 3
+                # 简单处理：3->3.31, 6->6.30, 9->9.30, 12->12.31
+                last_days = {3: 31, 6: 30, 9: 30, 12: 31}
+                return pd.Timestamp(year=year, month=month, day=last_days.get(month, 30))
+            # 尝试处理 '2025年1-4季度' (年度数据) -> 2025-12-31
+            m_year = re.search(r'(\d{4})年', date_str) 
+            if m_year:
+                 return pd.Timestamp(year=int(m_year.group(1)), month=12, day=31)
+            return None
+        except:
+            return None
+
+    @staticmethod
+    def _parse_chinese_month(date_str: str):
+        """解析 '2025年1月份' -> datetime"""
+        try:
+            if not isinstance(date_str, str): return None
+            import re
+            m = re.match(r'(\d{4})年(\d{1,2})月份', date_str)
+            if m:
+                return pd.Timestamp(year=int(m.group(1)), month=int(m.group(2)), day=1)
+            return None
+        except:
+            return None
+
+    # ==================== 实时行情 ====================
+
+    def get_realtime_quotes(self, codes: Optional[List[str]] = None,
+                            market: str = "CN") -> pd.DataFrame:
+        """获取实时行情数据"""
+        if market == "US" or (codes and len(codes) > 0 and codes[0].isalpha()):
+            return self._get_realtime_us(codes)
         if self.source == "akshare":
             try:
                 return self._get_realtime_akshare(codes)
             except Exception as e:
-                logger.warning(f"AKShare 实时行情获取失败: {e}. 尝试使用 yfinance 备用源...")
-                # 尝试将代码转换为 yfinance 格式并调用美股/全球获取逻辑
-                yf_codes = []
-                for c in (codes or []):
-                    if c.startswith('6'): yf_codes.append(f"{c}.SS")
-                    elif c.startswith(('0', '3')): yf_codes.append(f"{c}.SZ")
-                    else: yf_codes.append(c)
-                
-                try:
-                    return self._get_realtime_us(yf_codes)
-                except:
-                    pass
+                logger.warning(f"AKShare 实时行情获取失败: {e}")
                 raise e
         else:
             raise NotImplementedError("Tushare实时行情需要更高权限")
-    
+
     def _get_realtime_akshare(self, codes: Optional[List[str]]) -> pd.DataFrame:
-        """使用AKShare获取实时行情"""
+        """使用AKShare获取A股实时行情"""
         if ak is None:
             raise ImportError("AKShare未安装")
-        
         df = ak.stock_zh_a_spot_em()
-        
         result = pd.DataFrame({
-            'code': df['代码'],
-            'name': df['名称'],
-            'price': df['最新价'],
-            'change_pct': df['涨跌幅'],
-            'change': df['涨跌额'],
-            'volume': df['成交量'],
-            'amount': df['成交额'],
-            'open': df['开盘'],
-            'high': df['最高'],
-            'low': df['最低'],
-            'prev_close': df['昨收'],
-            'turnover': df['换手率'],
-            'pe': df['市盈率-动态'],
-            'pb': df['市净率'],
+            'code': df['代码'], 'name': df['名称'],
+            'price': df['最新价'], 'change_pct': df['涨跌幅'],
+            'change': df['涨跌额'], 'volume': df['成交量'],
+            'amount': df['成交额'], 'open': df['开盘'],
+            'high': df['最高'], 'low': df['最低'],
+            'prev_close': df['昨收'], 'turnover': df['换手率'],
+            'pe': df['市盈率-动态'], 'pb': df['市净率'],
         })
-        
         if codes:
             result = result[result['code'].isin(codes)]
-        
-        return result
-    
-    def get_index_data(
-        self,
-        code: str = "000300",
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None
-    ) -> pd.DataFrame:
-        """
-        获取指数数据
-        
-        Args:
-            code: 指数代码 (如 "000300" 沪深300)
-            start_date: 开始日期
-            end_date: 结束日期
-            
-        Returns:
-            DataFrame with index data
-        """
-        if self.source == "akshare":
-            if ak is None:
-                raise ImportError("AKShare未安装")
-            
-            try:
-                df = ak.stock_zh_index_daily(symbol=f"sh{code}")
-                
-                result = pd.DataFrame({
-                    'date': pd.to_datetime(df['date']),
-                    'open': df['open'],
-                    'high': df['high'],
-                    'low': df['low'],
-                    'close': df['close'],
-                    'volume': df['volume'],
-                })
-                
-                result.set_index('date', inplace=True)
-                
-                # 过滤日期
-                if start_date:
-                    result = result[result.index >= start_date]
-                if end_date:
-                    result = result[result.index <= end_date]
-                
-                return result
-            except Exception as e:
-                logger.warning(f"AKShare 指数数据获取失败: {e}. 尝试使用 yfinance 备用源...")
-                yf_code = f"{code}.SS" if code.startswith('000') else code # 简单处理常用指数
-                try:
-                    return self._get_daily_us(yf_code, start_date, end_date)
-                except:
-                    pass
-                raise e
-        else:
-            raise NotImplementedError("Tushare指数数据接口待实现")
-
-    def _get_daily_us(
-        self,
-        code: str,
-        start_date: Optional[str],
-        end_date: Optional[str]
-    ) -> pd.DataFrame:
-        """使用yfinance获取美股日线数据"""
-        if yf is None:
-            raise ImportError("yfinance未安装")
-            
-        df = yf.download(code, start=start_date, end=end_date, progress=False)
-        
-        if df.empty:
-            return pd.DataFrame()
-            
-        if isinstance(df.columns, pd.MultiIndex):
-            # yfinance returns MultiIndex (Price, Ticker) when fetching
-            # We just want the Price level (0) if there's only one ticker or we treat it as single
-            # But yfinance download(..., group_by='column') or default might vary.
-            # Usually for single ticker it might be (Price, Ticker) or just Price.
-            # If it is MultiIndex, let's try to flatten or take level 0
-            try:
-                # If the second level is the ticker, dropping it gives us the price types (Open, Close...)
-                if len(df.columns.levels) > 1:
-                     df.columns = df.columns.droplevel(1)
-            except Exception:
-                pass
-                
-        # 标准化列名
-        # Now columns should be strings (hopefully)
-        df.columns = [str(c).lower() for c in df.columns]
-        df.index.name = 'date'
-        
-        # 确保只有需要的列
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-
-        # result = df[required_cols].copy() # yfinance might have 'adj close', etc.
-        # Let's map explicitly to be safe
-        result = pd.DataFrame({
-            'open': df['open'],
-            'high': df['high'],
-            'low': df['low'],
-            'close': df['close'], # yfinance close is usually split-adjusted but not dividend-adjusted unless auto_adjust=True (default False? check version). Let's use 'close'. 
-            'volume': df['volume']
-        })
-        
-        # Add timestamp if needed or just keep index
-        # yfinance index is already datetime
-        
         return result
 
     def _get_realtime_us(self, codes: Optional[List[str]]) -> pd.DataFrame:
         """使用yfinance获取美股实时行情"""
         if yf is None:
             raise ImportError("yfinance未安装")
-            
         if not codes:
             return pd.DataFrame()
-            
         data_list = []
         for code in codes:
-            ticker = yf.Ticker(code)
             try:
-                # fast_info is faster for realtime price
+                ticker = yf.Ticker(code)
                 info = ticker.fast_info
-                
-                # fast_info attributes: last_price, previous_close, open, day_high, day_low, ...
-                # volume is not in fast_info directly always, sometimes need info
-                
                 price = info.last_price
                 prev_close = info.previous_close
-                if prev_close:
-                    change = price - prev_close
-                    change_pct = (change / prev_close) * 100
-                else:
-                    change = 0
-                    change_pct = 0
-                    
+                change = price - prev_close if prev_close else 0
+                change_pct = (change / prev_close) * 100 if prev_close else 0
                 data_list.append({
-                    'code': code,
-                    'name': code, # yfinance doesn't easily give short name in fast_info, would need ticker.info which is slow
-                    'price': price,
-                    'change_pct': change_pct,
+                    'code': code, 'name': code,
+                    'price': price, 'change_pct': change_pct,
                     'change': change,
-                    'volume': info.last_volume if hasattr(info, 'last_volume') else 0, # fast_info might not have volume
-                    'amount': 0, # not available easily
-                    'open': info.open,
-                    'high': info.day_high,
-                    'low': info.day_low,
+                    'volume': info.last_volume if hasattr(info, 'last_volume') else 0,
+                    'amount': 0, 'open': info.open,
+                    'high': info.day_high, 'low': info.day_low,
                     'prev_close': prev_close,
                 })
             except Exception as e:
                 logger.error(f"Error fetching {code}: {e}")
-                
         return pd.DataFrame(data_list)
+
+    # ==================== 指数数据 ====================
+
+    def get_index_data(self, code: str = "000300", start_date: Optional[str] = None,
+                       end_date: Optional[str] = None, market: str = "CN") -> pd.DataFrame:
+        """获取指数数据"""
+        if market == "US":
+            return self._get_daily_us(code, start_date, end_date)
+
+        if self.source == "akshare":
+            if ak is None:
+                raise ImportError("AKShare未安装")
+            try:
+                df = ak.stock_zh_index_daily(symbol=f"sh{code}")
+                result = pd.DataFrame({
+                    'date': pd.to_datetime(df['date']),
+                    'open': df['open'], 'high': df['high'],
+                    'low': df['low'], 'close': df['close'],
+                    'volume': df['volume'],
+                })
+                result.set_index('date', inplace=True)
+                if start_date:
+                    result = result[result.index >= start_date]
+                if end_date:
+                    result = result[result.index <= end_date]
+                return result
+            except Exception as e:
+                logger.warning(f"指数数据获取失败: {e}")
+                raise e
+        else:
+            raise NotImplementedError("Tushare指数数据接口待实现")
+
+    # ==================== 工具方法 ====================
+
+    @staticmethod
+    def _safe_float(row, col_name):
+        """安全提取浮点值"""
+        try:
+            val = row.get(col_name)
+            if val is not None and pd.notna(val):
+                return float(val)
+        except (ValueError, TypeError):
+            pass
+        return None
 
 
 # 便捷函数
@@ -454,16 +661,15 @@ def get_all_stocks() -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    # 测试代码
     fetcher = DataFetcher(source="akshare")
-    
-    # 测试获取股票列表
     print("获取股票列表...")
     stocks = fetcher.get_stock_list()
     print(f"共 {len(stocks)} 只股票")
-    print(stocks.head())
-    
-    # 测试获取日线数据
-    print("\n获取平安银行日线数据...")
-    df = fetcher.get_daily_data("000001", start_date="2024-01-01")
-    print(df.tail())
+
+    print("\n获取平安银行周线数据...")
+    weekly = fetcher.get_weekly_data("000001", start_date="2024-01-01")
+    print(weekly.tail())
+
+    print("\n获取基本面数据...")
+    fin = fetcher.get_financial_data("000001")
+    print(fin)
