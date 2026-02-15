@@ -54,6 +54,44 @@ def get_market(market_code: str) -> MarketConfig:
     return MARKETS[market_code]
 
 
+# A股主流ETF池(10只核心ETF)
+CN_ETF_POOL = [
+    "510300",  # 沪深300ETF
+    "510500",  # 中证500ETF
+    "159915",  # 创业板ETF
+    "515000",  # 科创50
+    "512880",  # 证券ETF
+    "515050",  # 5GETF
+    "518880",  # 黄金ETF
+    "511260",  # 上证10年期国债ETF
+    "513100",  # 纳斯达克ETF
+    "513500",  # 标普500ETF
+]
+
+# 美股主流ETF池(10只核心ETF)
+US_ETF_POOL = [
+    # 宽基指数
+    "SPY",     # S&P 500 ETF Trust
+    "QQQ",     # Invesco QQQ (纳斯达克100)
+    "IWM",     # iShares Russell 2000 (小盘)
+    "VTI",     # Vanguard Total Stock Market
+
+    # 行业/主题
+    "XLK",     # Technology Select Sector
+    "XLF",     # Financial Select Sector
+
+    # 国际/新兴市场
+    "EEM",     # iShares MSCI Emerging Markets
+
+    # 债券
+    "TLT",     # iShares 20+ Year Treasury Bond
+    "AGG",     # iShares Core U.S. Aggregate Bond
+
+    # 商品
+    "GLD",     # SPDR Gold Shares
+]
+
+
 def get_stock_pool(market_code: str) -> List[str]:
     """获取默认股票池"""
     if market_code == "CN":
@@ -78,3 +116,19 @@ def get_stock_pool(market_code: str) -> List[str]:
             "BAC", "CRM", "KO", "PEP", "MRK",
             "AMD", "NFLX", "INTC", "DIS", "CSCO",
         ]
+
+
+def get_etf_pool(market_code: str) -> List[str]:
+    """获取ETF池"""
+    if market_code == "CN":
+        return CN_ETF_POOL
+    elif market_code == "US":
+        return US_ETF_POOL
+    else:
+        raise ValueError(f"不支持的市场: {market_code}")
+
+
+def is_etf(code: str, market_code: str) -> bool:
+    """判断是否为ETF"""
+    etf_pool = get_etf_pool(market_code)
+    return code in etf_pool

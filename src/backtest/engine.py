@@ -387,6 +387,221 @@ class BacktestEngine:
         
         return result
 
+    def run_dca_backtest(
+        self,
+        etf_code: str,
+        df: pd.DataFrame,
+        strategy,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        initial_cash: float = 0
+    ) -> Dict:
+        """
+        定投策略回测(专门优化)
+
+        特点:
+        - 不需要大量初始资金(逐期投入)
+        - 记录每期投入金额
+        - 计算IRR(内部收益率)
+
+        Args:
+            etf_code: ETF代码
+            df: ETF历史价格数据
+            strategy: 定投策略实例
+            start_date: 开始日期
+            end_date: 结束日期
+            initial_cash: 初始现金(可为0)
+
+        Returns:
+            定投回测结果
+        """
+        # 过滤日期
+        if start_date:
+            df = df[df.index >= pd.Timestamp(start_date)]
+        if end_date:
+            df = df[df.index <= pd.Timestamp(end_date)]
+
+        if df.empty:
+            return {'status': 'no_data'}
+
+        logger.info(f"开始定投回测: {etf_code}, {df.index[0]} 至 {df.index[-1]}")
+
+        # 初始化
+        cash = initial_cash
+        shares = 0
+        cash_flows = []  # 现金流记录[(date, amount)]
+        trades = []      # 交易记录
+        equity_history = []
+
+        # 逐日回测
+        for date in df.index:
+            date_str = date.strftime('%Y-%m-%d')
+            current_price = df.loc[date, 'close']
+
+            # 当前市值
+            current_value = shares * current_price + cash
+
+            # 生成定投信号
+            import inspect
+            sig = inspect.signature(strategy.generate_signals)
+            param_count = len(sig.parameters)
+
+            if param_count == 2:  # generate_signals(self, df, date)
+                # DCA策略
+                signals = strategy.generate_signals(df, date_str)
+            else:  # generate_signals(self, df, date, current_value)
+                # VA策略(需要当前市值)
+                signals = strategy.generate_signals(df, date_str, shares * current_price)
+
+            # 执行交易
+            for signal in signals:
+                if signal['action'] == 'buy':
+                    buy_shares = signal['shares']
+                    buy_amount = buy_shares * current_price
+
+                    # 如果现金不足,记录为资金投入
+                    if buy_amount > cash:
+                        invest_amount = buy_amount - cash
+                        cash += invest_amount
+                        cash_flows.append((date, -invest_amount))  # 负数=流出
+
+                    # 买入
+                    shares += buy_shares
+                    cash -= buy_amount
+
+                    trades.append({
+                        'date': date,
+                        'action': 'buy',
+                        'price': current_price,
+                        'shares': buy_shares,
+                        'amount': buy_amount,
+                    })
+
+                elif signal['action'] == 'sell':
+                    sell_shares = min(signal['shares'], shares)  # 不能超卖
+                    sell_amount = sell_shares * current_price
+
+                    shares -= sell_shares
+                    cash += sell_amount
+
+                    trades.append({
+                        'date': date,
+                        'action': 'sell',
+                        'price': current_price,
+                        'shares': sell_shares,
+                        'amount': sell_amount,
+                    })
+
+            # 记录权益
+            equity = shares * current_price + cash
+            equity_history.append((date, equity))
+
+        # 最终清算
+        final_value = shares * df.iloc[-1]['close'] + cash
+        cash_flows.append((df.index[-1], final_value))  # 正数=流入
+
+        # 计算总投入
+        total_invested = sum(abs(cf[1]) for cf in cash_flows if cf[1] < 0)
+
+        # 计算IRR
+        irr = self._calculate_irr(cash_flows)
+
+        # 计算绝对收益
+        absolute_return = final_value - total_invested
+        absolute_return_pct = absolute_return / total_invested if total_invested > 0 else 0
+
+        # 生成权益曲线
+        dates, equity_vals = zip(*equity_history) if equity_history else ([], [])
+        equity_curve = pd.Series(equity_vals, index=pd.DatetimeIndex(dates))
+
+        # 计算最大回撤
+        if len(equity_curve) > 0:
+            rolling_max = equity_curve.cummax()
+            drawdown = (equity_curve - rolling_max) / rolling_max
+            max_drawdown = drawdown.min()
+        else:
+            max_drawdown = 0
+
+        logger.info(f"定投回测完成: IRR {irr:.2%}, 绝对收益率 {absolute_return_pct:.2%}")
+
+        return {
+            'status': 'success',
+            'etf_code': etf_code,
+            '总投入': total_invested,
+            '最终市值': final_value,
+            '绝对收益': absolute_return,
+            '绝对收益率': absolute_return_pct,
+            'IRR(年化)': irr,
+            '最大回撤': max_drawdown,
+            '定投次数': len([cf for cf in cash_flows if cf[1] < 0]),
+            '交易次数': len(trades),
+            '现金流': cash_flows,
+            '交易记录': trades,
+            '权益曲线': equity_curve,
+        }
+
+    def _calculate_irr(self, cash_flows: List[Tuple]) -> float:
+        """
+        计算内部收益率(IRR)
+
+        使用Newton-Raphson迭代法求解NPV=0时的r
+
+        Args:
+            cash_flows: [(date, amount)] 现金流列表
+
+        Returns:
+            年化IRR
+        """
+        if len(cash_flows) < 2:
+            return 0.0
+
+        try:
+            # 将日期转为天数
+            start_date = cash_flows[0][0]
+            days_amounts = []
+
+            for date, amount in cash_flows:
+                days = (pd.to_datetime(date) - pd.to_datetime(start_date)).days
+                days_amounts.append((days, amount))
+
+            # NPV函数
+            def npv(rate):
+                result = 0
+                for days, amount in days_amounts:
+                    result += amount / (1 + rate) ** (days / 365)
+                return result
+
+            # NPV导数
+            def npv_derivative(rate):
+                result = 0
+                for days, amount in days_amounts:
+                    years = days / 365
+                    result += -years * amount / (1 + rate) ** (years + 1)
+                return result
+
+            # Newton-Raphson迭代
+            rate = 0.1  # 初始猜测10%
+            for _ in range(100):
+                npv_val = npv(rate)
+                npv_deriv = npv_derivative(rate)
+
+                if abs(npv_val) < 1e-6:  # 收敛
+                    return rate
+
+                if abs(npv_deriv) < 1e-10:  # 导数太小,防止除零
+                    break
+
+                rate = rate - npv_val / npv_deriv
+
+                # 限制范围(-0.5 ~ 5.0)
+                rate = max(-0.5, min(5.0, rate))
+
+            return rate
+
+        except Exception as e:
+            logger.warning(f"IRR计算失败: {e}")
+            return 0.0
+
 
 # 示例策略
 def ma_cross_strategy(engine: BacktestEngine, date: datetime, data: Dict[str, pd.DataFrame]) -> List[Dict]:

@@ -198,3 +198,181 @@ class WalkForwardValidator:
             if len(subset) > 20:  # 至少20个交易日
                 result[code] = subset
         return result
+
+    def calculate_param_stability(self, windows: List[WalkForwardWindow]) -> float:
+        """
+        计算参数稳定性
+
+        如果策略参数在不同窗口中变化很大,说明策略不稳定(过拟合)
+        稳定性评分: 0-100, 100为最稳定
+        """
+        if len(windows) < 2:
+            return 100.0
+
+        # 这里简化处理,实际应该分析best_params的变化
+        # 当前基于窗口收益的标准差来评估
+        returns = [w.test_return for w in windows]
+        if not returns:
+            return 0.0
+
+        mean_return = np.mean(returns)
+        std_return = np.std(returns)
+
+        if mean_return <= 0:
+            return 0.0
+
+        # 变异系数: std/mean, 越小越稳定
+        cv = std_return / abs(mean_return) if mean_return != 0 else 999
+
+        # 转换为0-100分数 (cv<0.5 → 100分, cv>2 → 0分)
+        stability = max(0, min(100, 100 * (1 - cv / 2)))
+
+        return stability
+
+
+class StrategyHealthScorer:
+    """策略健康评分器"""
+
+    def __init__(self):
+        self.weights = {
+            'window_winrate': 0.30,      # 窗口胜率 30%
+            'avg_return': 0.25,          # 平均收益 25%
+            'sharpe_ratio': 0.20,        # 夏普比率 20%
+            'max_drawdown': 0.15,        # 最大回撤 15%
+            'stability': 0.10,           # 稳定性 10%
+        }
+
+    def score(self, result: WalkForwardResult) -> Dict:
+        """
+        综合评分策略健康度
+
+        Returns:
+            {
+                'total_score': 85,  # 总分0-100
+                'grade': 'A',       # 评级A+/A/B/C/D
+                'subscores': {...}, # 各维度得分
+                'recommendation': '策略稳定可靠,可实盘使用'
+            }
+        """
+        if not result.windows:
+            return {
+                'total_score': 0,
+                'grade': 'F',
+                'recommendation': '无验证数据'
+            }
+
+        subscores = {}
+
+        # 1. 窗口胜率得分 (0-100)
+        returns = [w.test_return for w in result.windows]
+        win_windows = sum(1 for r in returns if r > 0)
+        window_winrate = win_windows / len(result.windows)
+        subscores['window_winrate'] = self._winrate_score(window_winrate)
+
+        # 2. 平均收益得分 (0-100)
+        avg_return = np.mean(returns)
+        subscores['avg_return'] = self._return_score(avg_return)
+
+        # 3. 夏普比率得分 (0-100)
+        subscores['sharpe_ratio'] = self._sharpe_score(result.overall_sharpe)
+
+        # 4. 最大回撤得分 (0-100)
+        subscores['max_drawdown'] = self._drawdown_score(result.overall_max_drawdown)
+
+        # 5. 稳定性得分 (0-100)
+        subscores['stability'] = result.param_stability
+
+        # 加权总分
+        total_score = sum(
+            subscores[k] * self.weights[k]
+            for k in self.weights.keys()
+        )
+
+        # 评级
+        grade = self._get_grade(total_score)
+
+        # 建议
+        recommendation = self._generate_recommendation(
+            total_score, window_winrate, avg_return, result.overall_sharpe
+        )
+
+        return {
+            'total_score': round(total_score, 1),
+            'grade': grade,
+            'subscores': {k: round(v, 1) for k, v in subscores.items()},
+            'recommendation': recommendation,
+            'details': {
+                'window_winrate': f"{window_winrate:.1%}",
+                'avg_return': f"{avg_return:.2%}",
+                'sharpe_ratio': f"{result.overall_sharpe:.2f}",
+                'max_drawdown': f"{result.overall_max_drawdown:.2%}",
+            }
+        }
+
+    def _winrate_score(self, winrate: float) -> float:
+        """胜率得分 (>70% → 100分, <40% → 0分)"""
+        if winrate >= 0.70:
+            return 100
+        elif winrate <= 0.40:
+            return 0
+        else:
+            return (winrate - 0.40) / 0.30 * 100
+
+    def _return_score(self, annual_return: float) -> float:
+        """收益得分 (>20% → 100分, <0% → 0分)"""
+        if annual_return >= 0.20:
+            return 100
+        elif annual_return <= 0:
+            return 0
+        else:
+            return annual_return / 0.20 * 100
+
+    def _sharpe_score(self, sharpe: float) -> float:
+        """夏普比率得分 (>2 → 100分, <0.5 → 0分)"""
+        if sharpe >= 2.0:
+            return 100
+        elif sharpe <= 0.5:
+            return 0
+        else:
+            return (sharpe - 0.5) / 1.5 * 100
+
+    def _drawdown_score(self, max_dd: float) -> float:
+        """回撤得分 (回撤越小越好, <-5% → 100分, >-30% → 0分)"""
+        dd_abs = abs(max_dd)
+        if dd_abs <= 0.05:
+            return 100
+        elif dd_abs >= 0.30:
+            return 0
+        else:
+            return (0.30 - dd_abs) / 0.25 * 100
+
+    def _get_grade(self, score: float) -> str:
+        """分数转评级"""
+        if score >= 90:
+            return 'A+'
+        elif score >= 80:
+            return 'A'
+        elif score >= 70:
+            return 'B+'
+        elif score >= 60:
+            return 'B'
+        elif score >= 50:
+            return 'C'
+        else:
+            return 'D'
+
+    def _generate_recommendation(self, score: float, winrate: float,
+                                 avg_return: float, sharpe: float) -> str:
+        """生成操作建议"""
+        if score >= 80 and winrate >= 0.65:
+            return "✅ 策略稳定可靠,可实盘使用"
+        elif score >= 70 and winrate >= 0.60:
+            return "✅ 策略表现良好,建议小仓位试用"
+        elif score >= 60:
+            return "⚠️  策略表现一般,需进一步优化参数"
+        elif winrate < 0.50:
+            return "❌ 窗口胜率<50%,策略可能失效,建议放弃"
+        elif avg_return < 0:
+            return "❌ 平均收益为负,策略无效"
+        else:
+            return "⚠️  策略不稳定,风险较高,不建议实盘"

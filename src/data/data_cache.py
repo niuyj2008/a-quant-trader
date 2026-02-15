@@ -128,6 +128,14 @@ class DataCache:
             ).fetchone()
         return (row[0], row[1]) if row else None
 
+    def clear_daily(self, code: str, market: str = "CN"):
+        """清除指定股票的日线缓存数据"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM daily_ohlcv WHERE market=? AND code=?", (market, code))
+            conn.execute("DELETE FROM cache_meta WHERE market=? AND code=? AND table_name='daily_ohlcv'", (market, code))
+            conn.commit()
+        logger.debug(f"已清除缓存: {market}/{code}")
+
     # ==================== 基本面数据缓存 ====================
 
     def save_financial(self, code: str, data: Dict, date: str, market: str = "CN"):

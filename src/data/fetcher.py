@@ -30,12 +30,20 @@ except ImportError:
 
 from src.data.data_cache import DataCache
 
+# Phase 8: 导入数据验证器,确保所有数据真实可靠
+try:
+    from src.validation.data_validator import get_validator
+    DATA_VALIDATION_ENABLED = True
+except ImportError:
+    DATA_VALIDATION_ENABLED = False
+    logger.warning("DataValidator未安装,数据验证功能不可用")
+
 
 class DataFetcher:
     """统一数据获取器（增强版）"""
 
     def __init__(self, source: str = "akshare", tushare_token: Optional[str] = None,
-                 use_cache: bool = True):
+                 use_cache: bool = True, enable_validation: bool = True):
         """
         初始化数据获取器
 
@@ -43,10 +51,17 @@ class DataFetcher:
             source: 数据源 ("akshare" 或 "tushare")
             tushare_token: Tushare Pro token
             use_cache: 是否启用本地缓存
+            enable_validation: 是否启用数据验证(Phase 8新增)
         """
         self.source = source
         self.use_cache = use_cache
         self.cache = DataCache() if use_cache else None
+
+        # Phase 8: 数据验证器
+        self.enable_validation = enable_validation and DATA_VALIDATION_ENABLED
+        if self.enable_validation:
+            self.validator = get_validator()
+            logger.info("数据验证已启用,将确保所有数据真实可靠")
 
         if source == "tushare" and tushare_token:
             if ts:
@@ -105,7 +120,17 @@ class DataFetcher:
             cached = self.cache.load_daily(code, start_date, end_date, market)
             if not cached.empty:
                 logger.debug(f"缓存命中: {market}/{code} {len(cached)}条")
-                return cached
+                # Phase 8: 验证缓存数据
+                if self.enable_validation:
+                    validation_result = self.validator.validate_price_data(cached, code, market)
+                    if not validation_result['is_valid']:
+                        logger.warning(f"缓存数据验证失败: {validation_result['issues']}, 重新获取")
+                        # 清除无效缓存
+                        self.cache.clear_daily(code, market)
+                    else:
+                        return cached
+                else:
+                    return cached
 
         # 从数据源获取
         if market == "US":
@@ -114,6 +139,21 @@ class DataFetcher:
             df = self._get_daily_akshare(code, start_date, end_date, adjust)
         else:
             df = self._get_daily_tushare(code, start_date, end_date, adjust)
+
+        # Phase 8: 验证获取的数据
+        if self.enable_validation and not df.empty:
+            # 标记数据来源
+            df.attrs['source'] = self.source if market == 'CN' else 'yfinance'
+            df.attrs['fetch_time'] = datetime.now().isoformat()
+
+            validation_result = self.validator.validate_price_data(df, code, market)
+            if not validation_result['is_valid']:
+                logger.error(f"数据验证失败 [{code}]: {validation_result['issues']}")
+                # 严重错误时返回空DataFrame
+                if any('High < Low' in issue or '负数或0价格' in issue
+                       for issue in validation_result['issues']):
+                    logger.error("数据包含严重错误,拒绝使用")
+                    return pd.DataFrame()
 
         # 写入缓存
         if self.use_cache and self.cache and not df.empty:
