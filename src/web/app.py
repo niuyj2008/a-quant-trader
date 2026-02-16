@@ -1,18 +1,14 @@
 """
-股票量化策略决策支持系统 - Web界面（完整版 v3.0）
+股票量化策略决策支持系统 - Web界面（v4.0 整合版）
 
-核心功能面板:
-  1. 📊 个股交易策略 — 输入任意股票，生成买/卖/持有建议 + 基本面评分
-  2. 💼 当前持仓策略 — 持仓仪表盘、行业分布、调仓计划
-  3. 🎯 个股推荐 — 全市场扫描 + 策略胜率对比 + 有效性预警
-  4. 📈 行情分析 — K线图、技术指标
-  5. 🔬 因子研究 — 因子计算与分析 + 学术因子雷达图
-  6. 🧪 策略回测 — 历史回测 + 健康评分 + 专业指标
-  7. 📝 交易记录 — 交易明细与统计
-  8. 💰 ETF定投 — DCA/VA/再平衡策略回测
-  9. 🎯 目标规划 — 目标导向策略推荐 + 蒙特卡洛模拟
-  10. ⚡ 策略优化 — ML算法对比 + 策略集成
-  11. 📋 专业报告 — 30+核心指标 + 月度收益表 + 回撤分析
+核心功能面板（7个Tab）:
+  1. 📊 个股分析 — 策略信号 + 行情走势 + 因子研究（一站式）
+  2. 💼 持仓管理 — 持仓仪表盘、策略分析、交易记录
+  3. 🎯 市场扫描 — 全市场推荐 + 策略胜率对比 + 有效性预警
+  4. 🧪 策略回测 — 标准/专业回测报告（可切换）
+  5. 💰 ETF定投 — DCA/VA/再平衡策略回测
+  6. 🎯 目标规划 — 目标导向策略推荐 + 蒙特卡洛模拟
+  7. ⚡ 策略实验室 — ML算法对比 + 策略集成
 """
 
 import streamlit as st
@@ -138,135 +134,18 @@ def render_sidebar():
             """)
 
         st.markdown("---")
-        st.caption(f"系统版本 v3.0 | {datetime.now().strftime('%Y-%m-%d')}")
+        st.caption(f"系统版本 v4.0 | {datetime.now().strftime('%Y-%m-%d')}")
 
     return market_code, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
 
 
-# ==================== Tab1: 个股交易策略 ====================
-def render_stock_strategy(market_code, start_date):
-    st.header("📊 个股交易策略分析")
-    st.markdown("输入任意股票代码，系统将使用**6种策略模型**自动分析并给出买卖建议")
-
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        if market_code == "CN":
-            code = st.text_input("🔍 输入A股代码", value="000001", placeholder="如: 000001, 600519")
-        else:
-            code = st.text_input("🔍 输入美股代码", value="AAPL", placeholder="如: AAPL, MSFT")
-    with col2:
-        strategy_keys = list(STRATEGY_NAMES.keys())
-        selected_strategies = st.multiselect(
-            "📋 选择策略",
-            strategy_keys,
-            default=strategy_keys,
-            format_func=lambda x: f"{STRATEGY_NAMES[x]} ({STRATEGY_RISK_LEVELS[x]}风险)"
-        )
-    with col3:
-        analyze_btn = st.button("🚀 开始分析", type="primary", use_container_width=True)
-
-    if analyze_btn and code:
-        with st.spinner(f"正在分析 {code}..."):
-            try:
-                df = fetch_stock_data(code, start_date, market_code)
-                if df.empty:
-                    st.error(f"❌ 无法获取 {code} 的数据")
-                    return
-
-                financial = fetch_financial_data(code, market_code)
-
-                # 各策略分析
-                results = {}
-                for key in selected_strategies:
-                    try:
-                        strategy = get_strategy(key)
-                        results[key] = strategy.analyze_stock(code, df, financial, name=code)
-                    except Exception as e:
-                        st.warning(f"策略 {STRATEGY_NAMES[key]} 分析失败: {e}")
-
-                if not results:
-                    st.error("所有策略分析均失败")
-                    return
-
-                # ---- 当前价格和基本信息 ----
-                latest = df.iloc[-1]
-                prev_close = df.iloc[-2]['close'] if len(df) > 1 else latest['close']
-                change_pct = (latest['close'] - prev_close) / prev_close * 100
-
-                stock_name = fetch_stock_name(code, market_code)
-                if stock_name:
-                    st.subheader(f"{stock_name}（{code}）")
-                else:
-                    st.subheader(code)
-
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("当前价格", f"{'$' if market_code == 'US' else '¥'}{latest['close']:.2f}",
-                          f"{change_pct:+.2f}%")
-                m2.metric("最高价", f"{latest['high']:.2f}")
-                m3.metric("最低价", f"{latest['low']:.2f}")
-                m4.metric("成交量", f"{latest['volume']:,.0f}")
-
-                st.markdown("---")
-
-                # ---- 基本面评分卡片 (Phase 2/3) ----
-                if financial:
-                    st.subheader("💎 基本面评分")
-                    _render_fundamental_scorecard(financial, market_code)
-                    st.markdown("---")
-
-                # ---- 策略结果概览 ----
-                st.subheader("📋 策略信号概览")
-                overview_data = []
-                for key, report in results.items():
-                    action_emoji = {"买入": "🟢", "卖出": "🔴", "持有": "🟡",
-                                    "加仓": "🔵", "减仓": "🟠", "清仓": "⛔"}.get(report.action_cn, "⚪")
-                    overview_data.append({
-                        "策略": STRATEGY_NAMES[key],
-                        "信号": f"{action_emoji} {report.action_cn}",
-                        "信号强度": f"{report.confidence:.0f}/100",
-                        "风险等级": STRATEGY_RISK_LEVELS[key],
-                        "止损价": f"{report.stop_loss_price:.2f}" if report.stop_loss_price else "-",
-                    })
-                st.dataframe(pd.DataFrame(overview_data), use_container_width=True, hide_index=True)
-
-                # ---- 综合建议 ----
-                buy_count = sum(1 for r in results.values() if r.action in ('buy', 'add'))
-                sell_count = sum(1 for r in results.values() if r.action in ('sell', 'reduce'))
-                total = len(results)
-
-                if buy_count > total * 0.6:
-                    st.success(f"✅ **综合建议: 买入** — {buy_count}/{total}个策略看多")
-                elif sell_count > total * 0.6:
-                    st.error(f"🔴 **综合建议: 卖出** — {sell_count}/{total}个策略看空")
-                else:
-                    st.info(f"🟡 **综合建议: 观望** — 多空分歧较大({buy_count}看多, {sell_count}看空)")
-
-                st.markdown("---")
-
-                # ---- 各策略详细分析 ----
-                st.subheader("🔍 策略详细分析")
-                tabs = st.tabs([STRATEGY_NAMES[k] for k in results.keys()])
-
-                for tab, (key, report) in zip(tabs, results.items()):
-                    with tab:
-                        _render_strategy_detail(report, market_code)
-
-                # ---- K线图 ----
-                st.subheader("📈 行情走势")
-                _render_candlestick(df, code)
-
-            except Exception as e:
-                st.error(f"分析失败: {e}")
-                import traceback
-                st.code(traceback.format_exc())
-
+# ==================== 共享工具函数 ====================
 
 def _render_fundamental_scorecard(financial: dict, market_code: str):
     """渲染基本面四维度评分卡片"""
-    # 计算四个维度得分
     scores = {}
 
-    # 盈利能力 (ROE, 净利率)
+    # 盈利能力
     roe = financial.get('roe', 0)
     net_margin = financial.get('net_profit_margin', financial.get('net_margin', 0))
     if isinstance(roe, (int, float)) and roe > 0:
@@ -274,7 +153,7 @@ def _render_fundamental_scorecard(financial: dict, market_code: str):
     else:
         scores['盈利能力'] = 50
 
-    # 成长性 (营收增长, 利润增长)
+    # 成长性
     rev_growth = financial.get('revenue_growth', financial.get('revenue_yoy', 0))
     profit_growth = financial.get('profit_growth', financial.get('net_profit_yoy', 0))
     if isinstance(rev_growth, (int, float)):
@@ -282,7 +161,7 @@ def _render_fundamental_scorecard(financial: dict, market_code: str):
     else:
         scores['成长性'] = 50
 
-    # 估值吸引力 (PE, PB — 越低越好)
+    # 估值吸引力
     pe = financial.get('pe', financial.get('pe_ttm', 30))
     pb = financial.get('pb', 3)
     if isinstance(pe, (int, float)) and pe > 0:
@@ -292,18 +171,16 @@ def _render_fundamental_scorecard(financial: dict, market_code: str):
     else:
         scores['估值吸引力'] = 50
 
-    # 财务健康 (资产负债率, 现金流)
+    # 财务健康
     debt_ratio = financial.get('debt_ratio', financial.get('asset_liability_ratio', 50))
     if isinstance(debt_ratio, (int, float)):
         scores['财务健康'] = max(0, min(100, 100 - debt_ratio * 0.8))
     else:
         scores['财务健康'] = 50
 
-    # 综合得分
     total_score = sum(scores.values()) / len(scores) if scores else 50
     grade = 'A+' if total_score >= 85 else 'A' if total_score >= 75 else 'B' if total_score >= 60 else 'C' if total_score >= 40 else 'D'
 
-    # 展示
     cols = st.columns(5)
     cols[0].metric("综合评级", grade, f"{total_score:.0f}分")
     for i, (name, score) in enumerate(scores.items()):
@@ -315,7 +192,6 @@ def _render_strategy_detail(report: DecisionReport, market_code: str):
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        # 因子雷达图
         if report.factor_scores:
             fig = go.Figure()
             names = list(report.factor_scores.keys())
@@ -337,7 +213,6 @@ def _render_strategy_detail(report: DecisionReport, market_code: str):
             st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        # 因子贡献条形图
         if report.factor_contributions:
             contrib_df = pd.DataFrame({
                 '因子': list(report.factor_contributions.keys()),
@@ -352,7 +227,6 @@ def _render_strategy_detail(report: DecisionReport, market_code: str):
             fig.update_layout(title="因子贡献度分解", height=400, xaxis_title="贡献度")
             st.plotly_chart(fig, use_container_width=True)
 
-    # 决策理由
     st.markdown(f"**操作建议:** {report.action_cn} | **信号强度:** {report.confidence:.0f}/100")
 
     if report.reasoning:
@@ -378,10 +252,509 @@ def _render_strategy_detail(report: DecisionReport, market_code: str):
         cols[3].metric("阻力位", f"{currency}{report.resistance_price:.2f}")
 
 
-# ==================== Tab2: 持仓策略 (增强版) ====================
-def render_holding_strategy(market_code, start_date):
-    st.header("💼 当前持仓策略")
-    st.markdown("管理您的持仓，系统自动分析每只持仓并给出操作建议")
+def _render_candlestick(df, title=""):
+    """渲染K线图"""
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.03,
+                        row_heights=[0.7, 0.3])
+
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'], name='K线'
+    ), row=1, col=1)
+
+    for period, color in [(5, '#f39c12'), (20, '#3498db'), (60, '#e74c3c')]:
+        ma = df['close'].rolling(period).mean()
+        fig.add_trace(go.Scatter(x=df.index, y=ma, name=f'MA{period}',
+                                  line=dict(width=1, color=color)), row=1, col=1)
+
+    colors = ['#e74c3c' if df['close'].iloc[i] >= df['open'].iloc[i] else '#2ecc71'
+              for i in range(len(df))]
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='成交量',
+                          marker_color=colors), row=2, col=1)
+
+    fig.update_layout(
+        title=f"📈 {title}", height=600,
+        xaxis_rangeslider_visible=False,
+        template='plotly_dark'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _merge_sentiment_data(combined_factors: dict, sentiment: dict):
+    """合并市场情绪数据到因子字典"""
+    if 'margin_balance' in sentiment and isinstance(sentiment['margin_balance'], pd.DataFrame):
+        mb = sentiment['margin_balance']
+        if not mb.empty:
+            combined_factors['margin_balance_change'] = mb.iloc[-1].get('融资买入额')
+
+    if 'northbound_flow' in sentiment and isinstance(sentiment['northbound_flow'], pd.DataFrame):
+        nf = sentiment['northbound_flow']
+        if not nf.empty:
+            val = nf.iloc[-1].get('north_money')
+            if val is not None:
+                combined_factors['northbound_flow'] = val / 1e8
+
+    if 'vix' in sentiment and isinstance(sentiment['vix'], pd.DataFrame):
+        vix_df = sentiment['vix']
+        if not vix_df.empty:
+            try:
+                if isinstance(vix_df.columns, pd.MultiIndex):
+                    if 'Close' in vix_df.columns.get_level_values(0):
+                        val_s = vix_df['Close'].iloc[-1]
+                        val = val_s.iloc[0] if isinstance(val_s, pd.Series) else val_s
+                        combined_factors['vix'] = val
+                elif 'Close' in vix_df.columns:
+                    combined_factors['vix'] = vix_df['Close'].iloc[-1]
+            except Exception:
+                pass
+
+    if 'us_yield' in sentiment and isinstance(sentiment['us_yield'], pd.DataFrame):
+        us_yield_df = sentiment['us_yield']
+        if not us_yield_df.empty:
+            try:
+                if isinstance(us_yield_df.columns, pd.MultiIndex):
+                    if 'Close' in us_yield_df.columns.get_level_values(0):
+                        val_s = us_yield_df['Close'].iloc[-1]
+                        val = val_s.iloc[0] if isinstance(val_s, pd.Series) else val_s
+                        combined_factors['interest_rate'] = val
+                elif 'Close' in us_yield_df.columns:
+                    combined_factors['interest_rate'] = us_yield_df['Close'].iloc[-1]
+            except Exception:
+                pass
+
+
+def _run_weekly_backtest(code, df, strategy, bt_start, bt_end):
+    """共享的逐周回测引擎，返回 (results_df, equity_series, weekly, stats)"""
+    df_filtered = df[df.index <= str(bt_end)]
+    weekly = DataFetcher.aggregate_to_weekly(df_filtered)
+
+    results = []
+    equity = [1.0]
+    trades_list = []
+    cumulative = 1.0
+    max_cum = 1.0
+    max_drawdown = 0.0
+
+    for i in range(20, len(weekly)):
+        window = df_filtered[df_filtered.index <= weekly.index[i]]
+        try:
+            report = strategy.analyze_stock(code, window, name=code)
+            week_return = (weekly.iloc[i]['close'] / weekly.iloc[i-1]['close'] - 1) if i > 0 else 0
+
+            if report.action in ('buy', 'add') and report.confidence >= 60:
+                cumulative *= (1 + week_return)
+                equity.append(equity[-1] * (1 + week_return))
+                position = "持有"
+                trades_list.append({
+                    'date': weekly.index[i],
+                    'action': report.action,
+                    'price': weekly.iloc[i]['close'],
+                })
+            elif report.action in ('sell', 'reduce'):
+                equity.append(equity[-1])
+                position = "空仓"
+            else:
+                equity.append(equity[-1])
+                position = "观望"
+
+            max_cum = max(max_cum, cumulative)
+            dd = (cumulative - max_cum) / max_cum
+            max_drawdown = min(max_drawdown, dd)
+
+            results.append({
+                'date': weekly.index[i],
+                'action': report.action_cn,
+                'confidence': report.confidence,
+                'week_return': week_return,
+                'cumulative': cumulative,
+                'position': position,
+            })
+        except Exception:
+            equity.append(equity[-1])
+
+    results_df = pd.DataFrame(results) if results else pd.DataFrame()
+    equity_series = pd.Series(equity[1:], index=weekly.index[20:]) if len(equity) > 1 else pd.Series()
+
+    n_weeks = len(results_df)
+    n_years = n_weeks / 52 if n_weeks > 0 else 0
+    total_ret = cumulative - 1
+    annualized_ret = (cumulative ** (1 / n_years) - 1) if n_years > 0 else 0
+
+    hold_returns = results_df[results_df['position'] == '持有']['week_return'] if not results_df.empty else pd.Series()
+    if len(hold_returns) > 1 and hold_returns.std() > 0:
+        sharpe = (hold_returns.mean() / hold_returns.std()) * np.sqrt(52)
+    else:
+        sharpe = 0
+
+    buy_weeks = len(results_df[results_df['action'].isin(['买入', '加仓'])]) if not results_df.empty else 0
+    win_weeks = len(results_df[(results_df['position'] == '持有') & (results_df['week_return'] > 0)]) if not results_df.empty else 0
+    total_hold = len(results_df[results_df['position'] == '持有']) if not results_df.empty else 0
+
+    stats = {
+        'total_return': total_ret,
+        'annualized_return': annualized_ret,
+        'sharpe': sharpe,
+        'max_drawdown': max_drawdown,
+        'n_weeks': n_weeks,
+        'n_years': n_years,
+        'buy_weeks': buy_weeks,
+        'win_weeks': win_weeks,
+        'total_hold': total_hold,
+        'trades_list': trades_list,
+    }
+
+    return results_df, equity_series, weekly, stats
+
+
+# ==================== Tab A: 个股分析（合并原Tab1+Tab4+Tab5） ====================
+
+def render_stock_analysis(market_code, start_date):
+    """个股综合分析 — 策略信号 + 行情走势 + 因子研究"""
+    st.header("📊 个股综合分析")
+    st.markdown("输入任意股票代码，一站式查看**策略信号、行情走势、因子研究**")
+
+    # === 顶部: 共享的股票代码输入 + 策略选择 ===
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        if market_code == "CN":
+            code = st.text_input("🔍 输入A股代码", value="000001", placeholder="如: 000001, 600519", key="sa_code")
+        else:
+            code = st.text_input("🔍 输入美股代码", value="AAPL", placeholder="如: AAPL, MSFT", key="sa_code")
+    with col2:
+        strategy_keys = list(STRATEGY_NAMES.keys())
+        selected_strategies = st.multiselect(
+            "📋 选择策略",
+            strategy_keys,
+            default=strategy_keys,
+            format_func=lambda x: f"{STRATEGY_NAMES[x]} ({STRATEGY_RISK_LEVELS[x]}风险)",
+            key="sa_strategies"
+        )
+    with col3:
+        analyze_btn = st.button("🚀 开始分析", type="primary", use_container_width=True, key="sa_analyze")
+
+    # 策略介绍
+    with st.expander("💡 了解6种策略", expanded=False):
+        s1, s2 = st.columns(2)
+        with s1:
+            st.markdown("""
+**📊 多因子均衡策略**（中等风险）
+综合考虑估值、成长性、动量、波动率等多个维度，像"全科医生"一样给股票做全面体检。
+不偏重任何单一指标，追求稳健收益，适合大多数投资者的"默认选择"。
+
+**🚀 动量趋势策略**（中高风险）
+"强者恒强"——买入近期涨势好的股票，回避下跌趋势的标的。
+类似冲浪，顺着浪的方向走，适合趋势行情中追求超额收益。
+
+**💰 价值投资策略**（低风险）
+寻找被市场低估的"便宜好货"——低市盈率、高ROE、财务稳健的公司。
+像巴菲特一样用打折价买优质公司，适合有耐心的长线投资者。
+""")
+        with s2:
+            st.markdown("""
+**🛡️ 低波动防御策略**（低风险）
+专挑股价波动小、走势平稳的股票。行情好时可能跑不赢大盘，
+但下跌时回撤更小，适合风险厌恶型投资者，"少赚但也少亏"。
+
+**🔄 均值回归策略**（高风险）
+逆向思维——当股价跌得过狠时买入，涨得过高时卖出，赌它"物极必反"。
+类似"抄底逃顶"，在震荡市中表现好，但趋势市中有较大风险。
+
+**⚡ 技术突破策略**（中高风险）
+捕捉股价放量突破关键价位（前高、箱体上沿）的信号。
+突破往往意味着新趋势的开始，适合中短线操作和活跃交易者。
+""")
+
+    if not (analyze_btn and code):
+        return
+
+    with st.spinner(f"正在分析 {code}..."):
+        try:
+            df = fetch_stock_data(code, start_date, market_code)
+            if df.empty:
+                st.error(f"❌ 无法获取 {code} 的数据")
+                return
+
+            financial = fetch_financial_data(code, market_code)
+
+            # 股票基本信息
+            latest = df.iloc[-1]
+            prev_close = df.iloc[-2]['close'] if len(df) > 1 else latest['close']
+            change_pct = (latest['close'] - prev_close) / prev_close * 100
+
+            stock_name = fetch_stock_name(code, market_code)
+            if stock_name:
+                st.subheader(f"{stock_name}（{code}）")
+            else:
+                st.subheader(code)
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("当前价格", f"{'$' if market_code == 'US' else '¥'}{latest['close']:.2f}",
+                      f"{change_pct:+.2f}%")
+            m2.metric("最高价", f"{latest['high']:.2f}")
+            m3.metric("最低价", f"{latest['low']:.2f}")
+            m4.metric("成交量", f"{latest['volume']:,.0f}")
+
+            st.markdown("---")
+
+            # === 三个子Tab ===
+            sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📋 策略信号", "📈 行情走势", "🔬 因子研究"])
+
+            with sub_tab1:
+                _render_strategy_signals_panel(code, df, financial, selected_strategies, market_code)
+
+            with sub_tab2:
+                _render_market_charts_panel(code, df, market_code)
+
+            with sub_tab3:
+                _render_factor_research_panel(code, df, financial, market_code, start_date)
+
+        except Exception as e:
+            st.error(f"分析失败: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+
+def _render_strategy_signals_panel(code, df, financial, selected_strategies, market_code):
+    """策略信号子Tab — 基本面评分 + 策略信号概览 + 综合建议 + 详细分析"""
+    # 基本面评分
+    if financial:
+        st.subheader("💎 基本面评分")
+        _render_fundamental_scorecard(financial, market_code)
+        st.markdown("---")
+
+    # 各策略分析
+    results = {}
+    for key in selected_strategies:
+        try:
+            strategy = get_strategy(key)
+            results[key] = strategy.analyze_stock(code, df, financial, name=code)
+        except Exception as e:
+            st.warning(f"策略 {STRATEGY_NAMES[key]} 分析失败: {e}")
+
+    if not results:
+        st.error("所有策略分析均失败")
+        return
+
+    # 策略结果概览
+    st.subheader("📋 策略信号概览")
+    overview_data = []
+    for key, report in results.items():
+        action_emoji = {"买入": "🟢", "卖出": "🔴", "持有": "🟡",
+                        "加仓": "🔵", "减仓": "🟠", "清仓": "⛔"}.get(report.action_cn, "⚪")
+        overview_data.append({
+            "策略": STRATEGY_NAMES[key],
+            "信号": f"{action_emoji} {report.action_cn}",
+            "信号强度": f"{report.confidence:.0f}/100",
+            "风险等级": STRATEGY_RISK_LEVELS[key],
+            "止损价": f"{report.stop_loss_price:.2f}" if report.stop_loss_price else "-",
+        })
+    st.dataframe(pd.DataFrame(overview_data), use_container_width=True, hide_index=True)
+
+    # 综合建议
+    buy_count = sum(1 for r in results.values() if r.action in ('buy', 'add'))
+    sell_count = sum(1 for r in results.values() if r.action in ('sell', 'reduce'))
+    total = len(results)
+
+    if buy_count > total * 0.6:
+        st.success(f"✅ **综合建议: 买入** — {buy_count}/{total}个策略看多")
+    elif sell_count > total * 0.6:
+        st.error(f"🔴 **综合建议: 卖出** — {sell_count}/{total}个策略看空")
+    else:
+        st.info(f"🟡 **综合建议: 观望** — 多空分歧较大({buy_count}看多, {sell_count}看空)")
+
+    st.markdown("---")
+
+    # 各策略详细分析
+    st.subheader("🔍 策略详细分析")
+    tabs = st.tabs([STRATEGY_NAMES[k] for k in results.keys()])
+
+    for tab, (key, report) in zip(tabs, results.items()):
+        with tab:
+            _render_strategy_detail(report, market_code)
+
+
+def _render_market_charts_panel(code, df, market_code):
+    """行情走势子Tab — K线图 + RSI + MACD"""
+    _render_candlestick(df, code)
+
+    # 技术指标
+    try:
+        engine = get_factor_engine()
+        factored = engine.compute(df, ['rsi_14', 'macd', 'bollinger', 'ma_5', 'ma_20', 'ma_60'])
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("RSI")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=factored.index, y=factored['rsi_14'], name='RSI(14)'))
+            fig.add_hline(y=70, line_dash='dash', line_color='red', annotation_text='超买')
+            fig.add_hline(y=30, line_dash='dash', line_color='green', annotation_text='超卖')
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            st.subheader("MACD")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=factored.index, y=factored['macd'], name='MACD'))
+            fig.add_trace(go.Scatter(x=factored.index, y=factored['macd_signal'], name='Signal'))
+            colors = ['green' if v >= 0 else 'red' for v in factored['macd_hist']]
+            fig.add_trace(go.Bar(x=factored.index, y=factored['macd_hist'],
+                                 name='Histogram', marker_color=colors))
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"技术指标计算失败: {e}")
+
+
+def _render_factor_research_panel(code, df, financial, market_code, start_date):
+    """因子研究子Tab — 学术因子 + 因子值一览 + 相关性矩阵"""
+    try:
+        engine = get_factor_engine()
+        factored = engine.compute_all_core_factors(df)
+
+        macro = fetch_macro_data()
+        sentiment = fetch_sentiment_data(market_code)
+
+        latest_tech = factored.iloc[-1].to_dict()
+        combined_factors = latest_tech.copy()
+
+        if financial:
+            combined_factors.update(financial)
+        if macro:
+            for k, v in macro.items():
+                if isinstance(v, pd.Series) and not v.empty:
+                    combined_factors[k] = v.iloc[-1]
+        if sentiment:
+            _merge_sentiment_data(combined_factors, sentiment)
+
+        # 学术因子雷达图
+        st.subheader("🎓 学术因子评分")
+        try:
+            from src.factors.academic_factors import AcademicFactors
+            academic = AcademicFactors()
+            market_idx = "000300" if market_code == "CN" else "SPY"
+            try:
+                market_data = fetch_stock_data(market_idx, start_date, market_code)
+            except Exception:
+                market_data = df
+
+            academic_scores = academic.calculate_comprehensive_score(df, market_data, financial or {})
+
+            if academic_scores:
+                total_score = academic_scores.get('total_score', 50)
+                rank = academic_scores.get('rank', 'C')
+
+                cols = st.columns(6)
+                cols[0].metric("综合评级", rank, f"{total_score:.0f}分")
+                cols[1].metric("FF3因子", f"{academic_scores.get('ff3_score', 0):.0f}/30")
+                cols[2].metric("动量", f"{academic_scores.get('momentum_score', 0):.0f}/20")
+                cols[3].metric("质量", f"{academic_scores.get('quality_score', 0):.0f}/30")
+                cols[4].metric("低波动", f"{academic_scores.get('low_vol_score', 0):.0f}/20")
+                cols[5].metric("Beta", f"{academic_scores.get('fama_french', {}).get('MKT', 1.0):.2f}")
+
+                radar_names = ['FF3因子', '动量', '质量', '低波动']
+                radar_values = [
+                    academic_scores.get('ff3_score', 0) / 30 * 100,
+                    academic_scores.get('momentum_score', 0) / 20 * 100,
+                    academic_scores.get('quality_score', 0) / 30 * 100,
+                    academic_scores.get('low_vol_score', 0) / 20 * 100,
+                ]
+                radar_values_closed = radar_values + [radar_values[0]]
+                radar_names_closed = radar_names + [radar_names[0]]
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatterpolar(
+                    r=radar_values_closed, theta=radar_names_closed,
+                    fill='toself', name='学术因子',
+                    fillcolor='rgba(255, 165, 0, 0.2)',
+                    line=dict(color='orange')
+                ))
+                fig.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                    title="学术因子雷达图 (Fama-French + 动量 + 质量 + 低波)",
+                    height=400, showlegend=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        except Exception as e:
+            st.caption(f"学术因子分析暂不可用: {e}")
+
+        st.markdown("---")
+
+        # 因子分类展示
+        st.subheader("📊 因子值一览")
+
+        if 'gdp' in combined_factors: combined_factors['gdp_growth'] = combined_factors['gdp']
+        if 'm2' in combined_factors: combined_factors['m2_growth'] = combined_factors['m2']
+
+        display_categories = copy.deepcopy(FACTOR_CATEGORIES)
+        if market_code == "US":
+            display_categories["宏观经济"]["factors"] = ["interest_rate"]
+            display_categories["市场情绪"]["factors"] = ["vix"]
+            display_categories["宏观经济"]["description"] = "美联储利率/国债收益率"
+            display_categories["市场情绪"]["description"] = "恐慌指数 (VIX)"
+
+        for cat_name, cat_info in display_categories.items():
+            with st.expander(f"**{cat_name}** — {cat_info['description']}"):
+                data = []
+                for f in cat_info['factors']:
+                    val = combined_factors.get(f)
+                    if val is not None and pd.notna(val):
+                        if isinstance(val, (int, float)):
+                            if f == 'northbound_flow':
+                                val_str = f"{val:.2f}亿"
+                            else:
+                                val_str = f"{val:.4f}"
+                        else:
+                            val_str = str(val)
+                        data.append({"因子": f, "当前值": val_str})
+                if data:
+                    st.dataframe(pd.DataFrame(data), hide_index=True, use_container_width=True)
+                else:
+                    st.caption("暂无数据")
+
+        # 因子相关性
+        st.subheader("📉 因子相关性矩阵")
+        numerical_cols = [c for c in factored.columns
+                          if c not in ['open', 'high', 'low', 'close', 'volume', 'amount', 'turnover']
+                          and factored[c].dtype in ['float64', 'float32']]
+        if numerical_cols:
+            corr = factored[numerical_cols[:10]].corr()
+            fig = go.Figure(data=go.Heatmap(
+                z=corr.values, x=corr.columns, y=corr.index,
+                colorscale='RdBu_r', zmid=0
+            ))
+            fig.update_layout(height=500, title="因子相关性")
+            st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"因子研究失败: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+
+
+# ==================== Tab B: 持仓管理（合并原Tab2+Tab7） ====================
+
+def render_portfolio(market_code, start_date):
+    """持仓管理 — 持仓总览、策略分析、交易记录"""
+    st.header("💼 持仓管理")
+
+    sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📊 持仓总览", "📋 策略分析", "📝 交易记录"])
+
+    with sub_tab1:
+        _render_portfolio_dashboard(market_code, start_date)
+
+    with sub_tab2:
+        _render_portfolio_strategy(market_code, start_date)
+
+    with sub_tab3:
+        _render_trade_records(market_code)
+
+
+def _render_portfolio_dashboard(market_code, start_date):
+    """持仓总览: 添加持仓 + 仪表盘 + 行业分布 + 调仓计划"""
+    st.markdown("管理您的持仓，查看仪表盘和调仓计划")
 
     journal = get_journal()
 
@@ -415,7 +788,7 @@ def render_holding_strategy(market_code, start_date):
         st.dataframe(demo_data, hide_index=True)
         return
 
-    # ---- 持仓仪表盘 (Phase 3) ----
+    # 持仓仪表盘
     st.subheader("📊 持仓仪表盘")
     try:
         pm = get_portfolio_manager()
@@ -437,7 +810,7 @@ def render_holding_strategy(market_code, start_date):
         losing = dashboard.get('losing_count', 0)
         m5.metric("盈/亏", f"{profitable}盈 / {losing}亏")
 
-        # ---- 行业分布图 (Phase 3) ----
+        # 行业分布图 + Top5持仓
         sector_dist = dashboard.get('sector_distribution', {})
         top_positions = dashboard.get('top_positions', [])
 
@@ -473,85 +846,23 @@ def render_holding_strategy(market_code, start_date):
     except Exception as e:
         st.warning(f"持仓仪表盘加载失败: {e}")
 
+    # 调仓计划
     st.markdown("---")
-
-    # ---- 持仓分析 ----
-    st.subheader("📋 持仓策略分析")
-
-    strategy_key = st.selectbox("分析策略", list(STRATEGY_NAMES.keys()),
-                                format_func=lambda x: STRATEGY_NAMES[x], key="hold_strat")
-    strategy = get_strategy(strategy_key)
+    st.subheader("📝 调仓计划生成")
+    st.markdown("基于策略推荐，自动生成调仓清单")
 
     holdings_info = {}
     for _, row in holdings_df.iterrows():
         holdings_info[row['code']] = {
             'name': row.get('name', row['code']),
-            'shares': row['shares'],
-            'cost_price': row['cost_price'],
+            'shares': row.get('total_shares', row.get('shares', 0)),
+            'cost_price': row.get('average_cost', row.get('cost_price', 0)),
         }
-
-    if st.button("🔄 分析持仓建议", type="primary"):
-        with st.spinner("正在分析持仓..."):
-            data_dict = {}
-            for code in holdings_info:
-                try:
-                    df = fetch_stock_data(code, start_date, market_code)
-                    if not df.empty:
-                        data_dict[code] = df
-                except Exception:
-                    pass
-
-            if data_dict:
-                reports = strategy.analyze_portfolio(holdings_info, data_dict)
-
-                # 汇总表
-                summary_data = []
-                for report in reports:
-                    info = holdings_info.get(report.code, {})
-                    cost = info.get('cost_price', 0)
-                    pnl = (report.current_price - cost) / cost * 100 if cost > 0 and report.current_price else 0
-                    action_emoji = {"买入": "🟢", "卖出": "🔴", "持有": "🟡",
-                                    "加仓": "🔵", "减仓": "🟠", "清仓": "⛔"}.get(report.action_cn, "⚪")
-
-                    # 止损/止盈提醒 (Phase 3)
-                    alert = ""
-                    if report.stop_loss_price and report.current_price:
-                        if report.current_price <= report.stop_loss_price:
-                            alert = "⚠️ 触发止损"
-                    if pnl >= 30:
-                        alert = "🎯 建议止盈"
-
-                    summary_data.append({
-                        "代码": report.code,
-                        "成本价": f"{cost:.2f}",
-                        "现价": f"{report.current_price:.2f}" if report.current_price else "-",
-                        "盈亏": f"{pnl:+.1f}%",
-                        "建议": f"{action_emoji} {report.action_cn}",
-                        "信号强度": f"{report.confidence:.0f}",
-                        "预警": alert,
-                        "理由": report.reasoning[0] if report.reasoning else "",
-                    })
-
-                st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
-
-                # 详细建议
-                for report in reports:
-                    with st.expander(f"{report.code} - {report.action_cn}"):
-                        st.markdown(report.get_reasoning_text())
-                        if report.risk_warnings:
-                            for w in report.risk_warnings:
-                                st.warning(w)
-
-    # ---- 调仓计划 (Phase 3) ----
-    st.markdown("---")
-    st.subheader("📝 调仓计划生成")
-    st.markdown("基于策略推荐，自动生成调仓清单")
 
     if st.button("生成调仓计划", key="rebalance_plan"):
         with st.spinner("生成调仓计划..."):
             try:
                 pm = get_portfolio_manager()
-                # 使用等权目标
                 codes = list(holdings_info.keys())
                 if codes:
                     equal_weight = 1.0 / len(codes)
@@ -583,9 +894,119 @@ def render_holding_strategy(market_code, start_date):
                 st.warning(f"调仓计划生成失败: {e}")
 
 
-# ==================== Tab3: 个股推荐 (增强版) ====================
-def render_recommendations(market_code, start_date):
-    st.header("🎯 个股推荐")
+def _render_portfolio_strategy(market_code, start_date):
+    """持仓策略分析: 选策略 → 分析每只持仓 → 建议表"""
+    st.markdown("选择策略分析每只持仓，获取操作建议和止损止盈提醒")
+
+    journal = get_journal()
+    holdings_df = journal.get_holdings(market_code)
+
+    if holdings_df.empty:
+        st.info("📭 暂无持仓，请先在「持仓总览」中添加持仓。")
+        return
+
+    holdings_info = {}
+    for _, row in holdings_df.iterrows():
+        holdings_info[row['code']] = {
+            'name': row.get('name', row['code']),
+            'shares': row.get('total_shares', row.get('shares', 0)),
+            'cost_price': row.get('average_cost', row.get('cost_price', 0)),
+        }
+
+    strategy_key = st.selectbox("分析策略", list(STRATEGY_NAMES.keys()),
+                                format_func=lambda x: STRATEGY_NAMES[x], key="hold_strat")
+    strategy = get_strategy(strategy_key)
+
+    if st.button("🔄 分析持仓建议", type="primary", key="analyze_holdings"):
+        with st.spinner("正在分析持仓..."):
+            data_dict = {}
+            for code in holdings_info:
+                try:
+                    df = fetch_stock_data(code, start_date, market_code)
+                    if not df.empty:
+                        data_dict[code] = df
+                except Exception:
+                    pass
+
+            if data_dict:
+                reports = strategy.analyze_portfolio(holdings_info, data_dict)
+
+                summary_data = []
+                for report in reports:
+                    info = holdings_info.get(report.code, {})
+                    cost = info.get('cost_price', 0)
+                    pnl = (report.current_price - cost) / cost * 100 if cost > 0 and report.current_price else 0
+                    action_emoji = {"买入": "🟢", "卖出": "🔴", "持有": "🟡",
+                                    "加仓": "🔵", "减仓": "🟠", "清仓": "⛔"}.get(report.action_cn, "⚪")
+
+                    alert = ""
+                    if report.stop_loss_price and report.current_price:
+                        if report.current_price <= report.stop_loss_price:
+                            alert = "⚠️ 触发止损"
+                    if pnl >= 30:
+                        alert = "🎯 建议止盈"
+
+                    summary_data.append({
+                        "代码": report.code,
+                        "成本价": f"{cost:.2f}",
+                        "现价": f"{report.current_price:.2f}" if report.current_price else "-",
+                        "盈亏": f"{pnl:+.1f}%",
+                        "建议": f"{action_emoji} {report.action_cn}",
+                        "信号强度": f"{report.confidence:.0f}",
+                        "预警": alert,
+                        "理由": report.reasoning[0] if report.reasoning else "",
+                    })
+
+                st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+
+                for report in reports:
+                    with st.expander(f"{report.code} - {report.action_cn}"):
+                        st.markdown(report.get_reasoning_text())
+                        if report.risk_warnings:
+                            for w in report.risk_warnings:
+                                st.warning(w)
+
+
+def _render_trade_records(market_code):
+    """交易记录 + 绩效统计"""
+    journal = get_journal()
+
+    tab1, tab2 = st.tabs(["交易明细", "绩效统计"])
+
+    with tab1:
+        trades = journal.get_trades(market=market_code, limit=50)
+        if trades.empty:
+            st.info("暂无交易记录")
+        else:
+            display_cols = ['date', 'code', 'name', 'action', 'price', 'shares', 'amount', 'strategy', 'reason']
+            available = [c for c in display_cols if c in trades.columns]
+            st.dataframe(trades[available], use_container_width=True, hide_index=True)
+
+    with tab2:
+        trades = journal.get_trades(market=market_code, limit=200)
+        if trades.empty:
+            st.info("暂无交易记录，交易统计将在有足够记录后自动生成")
+        else:
+            total_trades = len(trades)
+            st.metric("总交易次数", total_trades)
+
+            if 'action' in trades.columns:
+                buy_trades = len(trades[trades['action'].isin(['buy', '买入', 'add', '加仓'])])
+                sell_trades = len(trades[trades['action'].isin(['sell', '卖出', 'reduce', '减仓'])])
+                col1, col2 = st.columns(2)
+                col1.metric("买入次数", buy_trades)
+                col2.metric("卖出次数", sell_trades)
+
+            if 'amount' in trades.columns:
+                total_amount = trades['amount'].sum()
+                st.metric("总交易金额", f"{total_amount:,.0f}")
+
+
+# ==================== Tab C: 市场扫描（原Tab3） ====================
+
+def render_market_scan(market_code, start_date):
+    """市场扫描推荐 — 全市场扫描 + 策略胜率对比 + 有效性预警"""
+    st.header("🎯 市场扫描推荐")
     st.markdown("系统自动扫描市场，推荐综合评分最高的投资标的")
 
     col1, col2, col3 = st.columns([2, 2, 1])
@@ -635,7 +1056,6 @@ def render_recommendations(market_code, start_date):
 
         journal = get_journal()
 
-        # 推荐列表
         st.subheader(f"📋 {STRATEGY_NAMES[rec_strategy]} — Top {len(recommendations)} 推荐")
 
         rec_data = []
@@ -652,7 +1072,6 @@ def render_recommendations(market_code, start_date):
                 "核心理由": report.reasoning[0] if report.reasoning else "",
             })
 
-            # 记录推荐
             try:
                 journal.record_recommendation(
                     market_code, report.code, rec_strategy,
@@ -665,13 +1084,12 @@ def render_recommendations(market_code, start_date):
 
         st.dataframe(pd.DataFrame(rec_data), use_container_width=True, hide_index=True)
 
-        # 详细分析
         st.subheader("📝 详细分析")
         for report in recommendations[:5]:
             with st.expander(f"#{rec_data[recommendations.index(report)]['排名']} {report.code} — {report.action_cn}({report.confidence:.0f}分)"):
                 _render_strategy_detail(report, market_code)
 
-    # ---- 策略胜率对比 (Phase 4) ----
+    # 策略胜率对比
     st.markdown("---")
     st.subheader("📊 策略胜率对比分析")
 
@@ -679,13 +1097,11 @@ def render_recommendations(market_code, start_date):
     try:
         winrate_df = journal.get_strategy_winrate_comparison()
         if winrate_df is not None and not winrate_df.empty:
-            # 策略有效性预警 (Phase 4)
             for _, row in winrate_df.iterrows():
                 winrate_3m = row.get('winrate_3m', 0.5)
                 if isinstance(winrate_3m, (int, float)) and winrate_3m < 0.45:
                     st.warning(f"⚠️ {row.get('strategy', '未知')}策略 3月胜率<45%({winrate_3m:.1%})，策略可能失效!")
 
-            # 对比表格
             display_data = []
             for _, row in winrate_df.iterrows():
                 display_data.append({
@@ -700,7 +1116,6 @@ def render_recommendations(market_code, start_date):
                 })
             st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
 
-            # 策略胜率柱状图 (Phase 4)
             if len(winrate_df) > 0:
                 fig = go.Figure()
                 strategies = winrate_df.get('strategy', winrate_df.index).tolist()
@@ -735,247 +1150,12 @@ def render_recommendations(market_code, start_date):
         st.info("暂无历史推荐记录")
 
 
-# ==================== Tab4: 行情分析 ====================
-def render_market_analysis(market_code, start_date):
-    st.header("📈 行情分析")
+# ==================== Tab D: 策略回测（合并原Tab6+Tab11） ====================
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if market_code == "CN":
-            code = st.text_input("股票代码", value="000001", key="ma_code")
-        else:
-            code = st.text_input("股票代码", value="AAPL", key="ma_code")
-    with col2:
-        if st.button("查询", key="ma_query"):
-            pass
-
-    if code:
-        try:
-            df = fetch_stock_data(code, start_date, market_code)
-            if df.empty:
-                st.warning("无数据")
-                return
-            _render_candlestick(df, code)
-
-            # 技术指标
-            engine = get_factor_engine()
-            factored = engine.compute(df, ['rsi_14', 'macd', 'bollinger', 'ma_5', 'ma_20', 'ma_60'])
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("RSI")
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=factored.index, y=factored['rsi_14'], name='RSI(14)'))
-                fig.add_hline(y=70, line_dash='dash', line_color='red', annotation_text='超买')
-                fig.add_hline(y=30, line_dash='dash', line_color='green', annotation_text='超卖')
-                fig.update_layout(height=300)
-                st.plotly_chart(fig, use_container_width=True)
-
-            with col2:
-                st.subheader("MACD")
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=factored.index, y=factored['macd'], name='MACD'))
-                fig.add_trace(go.Scatter(x=factored.index, y=factored['macd_signal'], name='Signal'))
-                colors = ['green' if v >= 0 else 'red' for v in factored['macd_hist']]
-                fig.add_trace(go.Bar(x=factored.index, y=factored['macd_hist'],
-                                     name='Histogram', marker_color=colors))
-                fig.update_layout(height=300)
-                st.plotly_chart(fig, use_container_width=True)
-
-        except Exception as e:
-            st.error(f"获取数据失败: {e}")
-
-
-# ==================== Tab5: 因子研究 (增强版) ====================
-def render_factor_research(market_code, start_date):
-    st.header("🔬 因子研究")
-
-    code = st.text_input("股票代码", value="000001" if market_code == "CN" else "AAPL", key="fr_code")
-
-    if code:
-        try:
-            df = fetch_stock_data(code, start_date, market_code)
-            if df.empty:
-                st.warning("无数据")
-                return
-
-            engine = get_factor_engine()
-            factored = engine.compute_all_core_factors(df)
-
-            # 获取其他维度数据
-            financial = fetch_financial_data(code, market_code)
-            macro = fetch_macro_data()
-            sentiment = fetch_sentiment_data(market_code)
-
-            # 合并最新因子值
-            latest_tech = factored.iloc[-1].to_dict()
-            combined_factors = latest_tech.copy()
-
-            if financial:
-                combined_factors.update(financial)
-            if macro:
-                for k, v in macro.items():
-                    if isinstance(v, pd.Series) and not v.empty:
-                         combined_factors[k] = v.iloc[-1]
-            if sentiment:
-                _merge_sentiment_data(combined_factors, sentiment)
-
-            # ---- 学术因子雷达图 (Phase 9.4) ----
-            st.subheader("🎓 学术因子评分")
-            try:
-                from src.factors.academic_factors import AcademicFactors
-                academic = AcademicFactors()
-                # 尝试获取市场数据作为基准
-                market_idx = "000300" if market_code == "CN" else "SPY"
-                try:
-                    market_data = fetch_stock_data(market_idx, start_date, market_code)
-                except Exception:
-                    market_data = df  # fallback
-
-                academic_scores = academic.calculate_comprehensive_score(df, market_data, financial or {})
-
-                if academic_scores:
-                    total_score = academic_scores.get('total_score', 50)
-                    rank = academic_scores.get('rank', 'C')
-
-                    # 评级卡片
-                    cols = st.columns(6)
-                    cols[0].metric("综合评级", rank, f"{total_score:.0f}分")
-                    cols[1].metric("FF3因子", f"{academic_scores.get('ff3_score', 0):.0f}/30")
-                    cols[2].metric("动量", f"{academic_scores.get('momentum_score', 0):.0f}/20")
-                    cols[3].metric("质量", f"{academic_scores.get('quality_score', 0):.0f}/30")
-                    cols[4].metric("低波动", f"{academic_scores.get('low_vol_score', 0):.0f}/20")
-                    cols[5].metric("Beta", f"{academic_scores.get('fama_french', {}).get('MKT', 1.0):.2f}")
-
-                    # 雷达图
-                    radar_names = ['FF3因子', '动量', '质量', '低波动']
-                    radar_values = [
-                        academic_scores.get('ff3_score', 0) / 30 * 100,
-                        academic_scores.get('momentum_score', 0) / 20 * 100,
-                        academic_scores.get('quality_score', 0) / 30 * 100,
-                        academic_scores.get('low_vol_score', 0) / 20 * 100,
-                    ]
-                    radar_values_closed = radar_values + [radar_values[0]]
-                    radar_names_closed = radar_names + [radar_names[0]]
-
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatterpolar(
-                        r=radar_values_closed, theta=radar_names_closed,
-                        fill='toself', name='学术因子',
-                        fillcolor='rgba(255, 165, 0, 0.2)',
-                        line=dict(color='orange')
-                    ))
-                    fig.update_layout(
-                        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                        title="学术因子雷达图 (Fama-French + 动量 + 质量 + 低波)",
-                        height=400, showlegend=False
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-            except Exception as e:
-                st.caption(f"学术因子分析暂不可用: {e}")
-
-            st.markdown("---")
-
-            # 因子分类展示 (原有功能)
-            st.subheader("📊 因子值一览")
-
-            if 'gdp' in combined_factors: combined_factors['gdp_growth'] = combined_factors['gdp']
-            if 'm2' in combined_factors: combined_factors['m2_growth'] = combined_factors['m2']
-
-            display_categories = copy.deepcopy(FACTOR_CATEGORIES)
-            if market_code == "US":
-                display_categories["宏观经济"]["factors"] = ["interest_rate"]
-                display_categories["市场情绪"]["factors"] = ["vix"]
-                display_categories["宏观经济"]["description"] = "美联储利率/国债收益率"
-                display_categories["市场情绪"]["description"] = "恐慌指数 (VIX)"
-
-            for cat_name, cat_info in display_categories.items():
-                with st.expander(f"**{cat_name}** — {cat_info['description']}"):
-                    data = []
-                    for f in cat_info['factors']:
-                        val = combined_factors.get(f)
-                        if val is not None and pd.notna(val):
-                            if isinstance(val, (int, float)):
-                                if f == 'northbound_flow':
-                                    val_str = f"{val:.2f}亿"
-                                else:
-                                    val_str = f"{val:.4f}"
-                            else:
-                                val_str = str(val)
-                            data.append({"因子": f, "当前值": val_str})
-                    if data:
-                        st.dataframe(pd.DataFrame(data), hide_index=True, use_container_width=True)
-                    else:
-                        st.caption("暂无数据")
-
-            # 因子相关性
-            st.subheader("📉 因子相关性矩阵")
-            numerical_cols = [c for c in factored.columns
-                              if c not in ['open', 'high', 'low', 'close', 'volume', 'amount', 'turnover']
-                              and factored[c].dtype in ['float64', 'float32']]
-            if numerical_cols:
-                corr = factored[numerical_cols[:10]].corr()
-                fig = go.Figure(data=go.Heatmap(
-                    z=corr.values, x=corr.columns, y=corr.index,
-                    colorscale='RdBu_r', zmid=0
-                ))
-                fig.update_layout(height=500, title="因子相关性")
-                st.plotly_chart(fig, use_container_width=True)
-
-        except Exception as e:
-            st.error(f"因子研究失败: {e}")
-            import traceback
-            st.code(traceback.format_exc())
-
-
-def _merge_sentiment_data(combined_factors: dict, sentiment: dict):
-    """合并市场情绪数据到因子字典"""
-    if 'margin_balance' in sentiment and isinstance(sentiment['margin_balance'], pd.DataFrame):
-        mb = sentiment['margin_balance']
-        if not mb.empty:
-            combined_factors['margin_balance_change'] = mb.iloc[-1].get('融资买入额')
-
-    if 'northbound_flow' in sentiment and isinstance(sentiment['northbound_flow'], pd.DataFrame):
-        nf = sentiment['northbound_flow']
-        if not nf.empty:
-            val = nf.iloc[-1].get('north_money')
-            if val is not None:
-                combined_factors['northbound_flow'] = val / 1e8
-
-    if 'vix' in sentiment and isinstance(sentiment['vix'], pd.DataFrame):
-        vix_df = sentiment['vix']
-        if not vix_df.empty:
-            try:
-                if isinstance(vix_df.columns, pd.MultiIndex):
-                    if 'Close' in vix_df.columns.get_level_values(0):
-                        val_s = vix_df['Close'].iloc[-1]
-                        val = val_s.iloc[0] if isinstance(val_s, pd.Series) else val_s
-                        combined_factors['vix'] = val
-                elif 'Close' in vix_df.columns:
-                    combined_factors['vix'] = vix_df['Close'].iloc[-1]
-            except Exception:
-                pass
-
-    if 'us_yield' in sentiment and isinstance(sentiment['us_yield'], pd.DataFrame):
-        us_yield_df = sentiment['us_yield']
-        if not us_yield_df.empty:
-            try:
-                if isinstance(us_yield_df.columns, pd.MultiIndex):
-                    if 'Close' in us_yield_df.columns.get_level_values(0):
-                        val_s = us_yield_df['Close'].iloc[-1]
-                        val = val_s.iloc[0] if isinstance(val_s, pd.Series) else val_s
-                        combined_factors['interest_rate'] = val
-                elif 'Close' in us_yield_df.columns:
-                    combined_factors['interest_rate'] = us_yield_df['Close'].iloc[-1]
-            except Exception:
-                pass
-
-
-# ==================== Tab6: 策略回测 (增强版) ====================
 def render_backtest(market_code, start_date):
+    """策略回测 — 标准/专业报告"""
     st.header("🧪 策略回测")
-    st.markdown("使用历史数据验证策略表现")
+    st.markdown("使用历史数据验证策略表现，支持**标准报告**和**专业报告(30+指标)**")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -985,8 +1165,17 @@ def render_backtest(market_code, start_date):
     with col3:
         bt_end = st.date_input("结束日期", datetime.now(), key="bt_end")
 
-    bt_strategy = st.selectbox("回测策略", list(STRATEGY_NAMES.keys()),
-                                format_func=lambda x: STRATEGY_NAMES[x], key="bt_strategy")
+    col4, col5 = st.columns([2, 1])
+    with col4:
+        bt_strategy = st.selectbox("回测策略", list(STRATEGY_NAMES.keys()),
+                                    format_func=lambda x: STRATEGY_NAMES[x], key="bt_strategy")
+    with col5:
+        report_level = st.radio(
+            "报告详细程度",
+            ["standard", "professional"],
+            format_func=lambda x: {"standard": "标准报告", "professional": "专业报告(30+指标)"}[x],
+            horizontal=True, key="bt_report_level"
+        )
 
     if st.button("开始回测", type="primary", key="bt_run"):
         with st.spinner("回测中..."):
@@ -996,127 +1185,83 @@ def render_backtest(market_code, start_date):
                     st.error("无数据")
                     return
 
-                df = df[df.index <= str(bt_end)]
                 strategy = get_strategy(bt_strategy)
+                results_df, equity_series, weekly, stats = _run_weekly_backtest(
+                    code, df, strategy, bt_start, bt_end
+                )
 
-                # 简化回测: 逐周分析
-                weekly = DataFetcher.aggregate_to_weekly(df)
-                results = []
-                cumulative = 1.0
-                max_cum = 1.0
-                max_drawdown = 0.0
+                if results_df.empty:
+                    st.warning("回测未产生有效结果")
+                    return
 
-                for i in range(20, len(weekly)):
-                    window = df[df.index <= weekly.index[i]]
-                    try:
-                        report = strategy.analyze_stock(code, window, name=code)
-                        week_return = (weekly.iloc[i]['close'] / weekly.iloc[i-1]['close'] - 1) if i > 0 else 0
+                # 收益曲线
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=results_df['date'], y=results_df['cumulative'],
+                                         name='策略收益', line=dict(width=2)))
+                bm_cum = (1 + weekly['close'].pct_change()).cumprod().iloc[20:]
+                fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum.values,
+                                         name='买入持有', line=dict(dash='dash')))
+                fig.update_layout(title="策略收益 vs 买入持有", height=400,
+                                  yaxis_title="累计收益倍数")
+                st.plotly_chart(fig, use_container_width=True)
 
-                        if report.action in ('buy', 'add') and report.confidence >= 60:
-                            cumulative *= (1 + week_return)
-                            position = "持有"
-                        elif report.action in ('sell', 'reduce'):
-                            position = "空仓"
-                        else:
-                            position = "观望"
+                # 基础绩效指标
+                col1, col2, col3, col4, col5, col6 = st.columns(6)
+                col1.metric("总收益", f"{stats['total_return']:.2%}")
+                col2.metric("年化收益", f"{stats['annualized_return']:.2%}")
+                col3.metric("夏普比率", f"{stats['sharpe']:.2f}")
+                col4.metric("最大回撤", f"{stats['max_drawdown']:.2%}")
+                col5.metric("买入周数", f"{stats['buy_weeks']}/{stats['n_weeks']}")
+                col6.metric("持仓胜率", f"{stats['win_weeks']/stats['total_hold']:.1%}" if stats['total_hold'] > 0 else "N/A")
 
-                        # 追踪最大回撤
-                        max_cum = max(max_cum, cumulative)
-                        dd = (cumulative - max_cum) / max_cum
-                        max_drawdown = min(max_drawdown, dd)
+                # 策略健康评分
+                st.markdown("---")
+                st.subheader("🏥 策略健康评分")
+                try:
+                    from src.backtest.walk_forward import StrategyHealthScorer, WalkForwardResult, WalkForwardWindow
+                    mock_window = WalkForwardWindow(
+                        window_id=1,
+                        train_start=str(bt_start),
+                        train_end=str(bt_end),
+                        test_start=str(bt_start),
+                        test_end=str(bt_end),
+                        test_return=stats['total_return'],
+                        test_sharpe=stats['sharpe'],
+                        test_max_drawdown=abs(stats['max_drawdown']),
+                        test_win_rate=stats['win_weeks'] / stats['total_hold'] if stats['total_hold'] > 0 else 0,
+                        n_trades=stats['buy_weeks'],
+                    )
+                    wf_result = WalkForwardResult(
+                        windows=[mock_window],
+                        total_return=stats['total_return'],
+                        annualized_return=stats['annualized_return'],
+                        overall_sharpe=stats['sharpe'],
+                        overall_max_drawdown=abs(stats['max_drawdown']),
+                    )
+                    scorer = StrategyHealthScorer()
+                    health = scorer.score(wf_result)
 
-                        results.append({
-                            'date': weekly.index[i],
-                            'action': report.action_cn,
-                            'confidence': report.confidence,
-                            'week_return': week_return,
-                            'cumulative': cumulative,
-                            'position': position,
-                        })
-                    except Exception:
-                        pass
+                    h_cols = st.columns(6)
+                    h_cols[0].metric("健康评分", f"{health.get('total_score', 0):.0f}/100")
+                    h_cols[1].metric("评级", health.get('grade', 'N/A'))
+                    subscores = health.get('subscores', {})
+                    h_cols[2].metric("收益", f"{subscores.get('avg_return', 0):.0f}")
+                    h_cols[3].metric("夏普", f"{subscores.get('sharpe_ratio', 0):.0f}")
+                    h_cols[4].metric("回撤控制", f"{subscores.get('max_drawdown', 0):.0f}")
+                    h_cols[5].metric("稳定性", f"{subscores.get('stability', 0):.0f}")
 
-                if results:
-                    results_df = pd.DataFrame(results)
+                    rec = health.get('recommendation', '')
+                    if rec:
+                        st.info(f"💡 {rec}")
 
-                    # 收益曲线
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=results_df['date'], y=results_df['cumulative'],
-                                             name='策略收益', line=dict(width=2)))
-                    bm_cum = (1 + weekly['close'].pct_change()).cumprod().iloc[20:]
-                    fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum.values,
-                                             name='买入持有', line=dict(dash='dash')))
-                    fig.update_layout(title="策略收益 vs 买入持有", height=400,
-                                      yaxis_title="累计收益倍数")
-                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.caption(f"健康评分暂不可用: {e}")
 
-                    # ---- 增强绩效指标 (Phase 5/9.5) ----
-                    total_ret = cumulative - 1
-                    n_weeks = len(results_df)
-                    n_years = n_weeks / 52
-                    annualized_ret = (cumulative ** (1 / n_years) - 1) if n_years > 0 else 0
-
-                    # 夏普比率
-                    hold_returns = results_df[results_df['position'] == '持有']['week_return']
-                    if len(hold_returns) > 1:
-                        sharpe = (hold_returns.mean() / hold_returns.std()) * np.sqrt(52) if hold_returns.std() > 0 else 0
-                    else:
-                        sharpe = 0
-
-                    col1, col2, col3, col4, col5, col6 = st.columns(6)
-                    col1.metric("总收益", f"{total_ret:.2%}")
-                    col2.metric("年化收益", f"{annualized_ret:.2%}")
-                    col3.metric("夏普比率", f"{sharpe:.2f}")
-                    col4.metric("最大回撤", f"{max_drawdown:.2%}")
-                    buy_weeks = len(results_df[results_df['action'].isin(['买入', '加仓'])])
-                    col5.metric("买入周数", f"{buy_weeks}/{n_weeks}")
-                    win_weeks = len(results_df[(results_df['position'] == '持有') & (results_df['week_return'] > 0)])
-                    total_hold = len(results_df[results_df['position'] == '持有'])
-                    col6.metric("持仓胜率", f"{win_weeks/total_hold:.1%}" if total_hold > 0 else "N/A")
-
-                    # ---- 策略健康评分 (Phase 5) ----
+                # 专业报告内容
+                if report_level == "professional":
                     st.markdown("---")
-                    st.subheader("🏥 策略健康评分")
-                    try:
-                        from src.backtest.walk_forward import StrategyHealthScorer, WalkForwardResult, WalkForwardWindow
-                        # 构建简化的WalkForwardResult
-                        mock_window = WalkForwardWindow(
-                            window_id=1,
-                            train_start=str(bt_start),
-                            train_end=str(bt_end),
-                            test_start=str(bt_start),
-                            test_end=str(bt_end),
-                            test_return=total_ret,
-                            test_sharpe=sharpe,
-                            test_max_drawdown=abs(max_drawdown),
-                            test_win_rate=win_weeks / total_hold if total_hold > 0 else 0,
-                            n_trades=buy_weeks,
-                        )
-                        wf_result = WalkForwardResult(
-                            windows=[mock_window],
-                            total_return=total_ret,
-                            annualized_return=annualized_ret,
-                            overall_sharpe=sharpe,
-                            overall_max_drawdown=abs(max_drawdown),
-                        )
-                        scorer = StrategyHealthScorer()
-                        health = scorer.score(wf_result)
-
-                        h_cols = st.columns(6)
-                        h_cols[0].metric("健康评分", f"{health.get('total_score', 0):.0f}/100")
-                        h_cols[1].metric("评级", health.get('grade', 'N/A'))
-                        subscores = health.get('subscores', {})
-                        h_cols[2].metric("收益", f"{subscores.get('avg_return', 0):.0f}")
-                        h_cols[3].metric("夏普", f"{subscores.get('sharpe_ratio', 0):.0f}")
-                        h_cols[4].metric("回撤控制", f"{subscores.get('max_drawdown', 0):.0f}")
-                        h_cols[5].metric("稳定性", f"{subscores.get('stability', 0):.0f}")
-
-                        rec = health.get('recommendation', '')
-                        if rec:
-                            st.info(f"💡 {rec}")
-
-                    except Exception as e:
-                        st.caption(f"健康评分暂不可用: {e}")
+                    st.subheader("📋 专业回测报告")
+                    _render_professional_report_content(equity_series, weekly, stats['trades_list'])
 
             except Exception as e:
                 st.error(f"回测失败: {e}")
@@ -1124,28 +1269,108 @@ def render_backtest(market_code, start_date):
                 st.code(traceback.format_exc())
 
 
-# ==================== Tab7: 交易记录 ====================
-def render_trade_records(market_code):
-    st.header("📝 交易记录")
+def _render_professional_report_content(equity_series, weekly, trades_list):
+    """专业报告内容: 30+指标 + 月度收益表 + 回撤分析"""
+    try:
+        from src.backtest.professional_report import ProfessionalBacktestReport
 
-    journal = get_journal()
+        backtest_result = {
+            'equity_curve': equity_series,
+            'trades': trades_list,
+            'holdings': pd.DataFrame(),
+            'metrics': {},
+        }
 
-    tab1, tab2 = st.tabs(["交易明细", "绩效统计"])
+        benchmark = weekly['close'].iloc[20:]
 
-    with tab1:
-        trades = journal.get_trades(market=market_code, limit=50)
-        if trades.empty:
-            st.info("暂无交易记录")
-        else:
-            display_cols = ['date', 'code', 'name', 'action', 'price', 'shares', 'amount', 'strategy', 'reason']
-            available = [c for c in display_cols if c in trades.columns]
-            st.dataframe(trades[available], use_container_width=True, hide_index=True)
+        pro_report = ProfessionalBacktestReport(backtest_result, benchmark_data=benchmark)
+        metrics = pro_report.calculate_all_metrics()
 
-    with tab2:
-        st.markdown("交易统计将在有足够交易记录后自动生成")
+        # 核心指标面板
+        st.subheader("📊 核心指标（30+）")
+
+        st.markdown("**收益指标**")
+        r_cols = st.columns(5)
+        r_cols[0].metric("总收益率", f"{metrics.get('总收益率', 0):.2%}")
+        r_cols[1].metric("年化收益率", f"{metrics.get('年化收益率', 0):.2%}")
+        r_cols[2].metric("CAGR", f"{metrics.get('CAGR', 0):.2%}")
+        r_cols[3].metric("日均收益率", f"{metrics.get('日均收益率', 0):.4%}")
+        r_cols[4].metric("正收益月占比", f"{metrics.get('正收益月份占比', 0):.1%}")
+
+        st.markdown("**风险指标**")
+        k_cols = st.columns(5)
+        k_cols[0].metric("年化波动率", f"{metrics.get('年化波动率', 0):.2%}")
+        k_cols[1].metric("最大回撤", f"{metrics.get('最大回撤', 0):.2%}")
+        k_cols[2].metric("VaR(95%)", f"{metrics.get('VaR(95%)', 0):.2%}")
+        k_cols[3].metric("CVaR(95%)", f"{metrics.get('CVaR(95%)', 0):.2%}")
+        k_cols[4].metric("下行波动率", f"{metrics.get('下行波动率', 0):.2%}")
+
+        st.markdown("**风险调整收益**")
+        s_cols = st.columns(5)
+        s_cols[0].metric("夏普比率", f"{metrics.get('夏普比率', 0):.2f}")
+        s_cols[1].metric("Sortino比率", f"{metrics.get('Sortino比率', 0):.2f}")
+        s_cols[2].metric("Calmar比率", f"{metrics.get('Calmar比率', 0):.2f}")
+        s_cols[3].metric("Alpha", f"{metrics.get('Alpha', 0):.2%}")
+        s_cols[4].metric("Beta", f"{metrics.get('Beta', 0):.2f}")
+
+        st.markdown("**交易指标**")
+        t_cols = st.columns(5)
+        t_cols[0].metric("交易次数", f"{metrics.get('交易次数', 0)}")
+        t_cols[1].metric("胜率", f"{metrics.get('胜率', 0):.1%}")
+        t_cols[2].metric("盈亏比", f"{metrics.get('盈亏比', 0):.2f}")
+        t_cols[3].metric("最大连续盈利", f"{metrics.get('最大连续盈利', 0)}")
+        t_cols[4].metric("最大连续亏损", f"{metrics.get('最大连续亏损', 0)}")
+
+        st.markdown("---")
+
+        # 权益曲线
+        st.subheader("📈 权益曲线")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=equity_series.index, y=equity_series.values,
+                                 name='策略净值', line=dict(width=2)))
+        fig.update_layout(height=400, yaxis_title="净值")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 月度收益表
+        st.subheader("📅 月度收益表")
+        try:
+            monthly_table = pro_report.generate_monthly_returns_table()
+            if monthly_table is not None and not monthly_table.empty:
+                styled = monthly_table.style.map(
+                    lambda v: f"background-color: {'#d4edda' if isinstance(v, (int, float)) and v > 0 else '#f8d7da' if isinstance(v, (int, float)) and v < 0 else ''}"
+                ).format("{:.2%}", na_rep="-")
+                st.dataframe(styled, use_container_width=True)
+        except Exception as e:
+            st.caption(f"月度收益表生成失败: {e}")
+
+        # 回撤分析
+        st.subheader("📉 Top 回撤事件")
+        try:
+            drawdowns = pro_report.analyze_drawdowns()
+            if drawdowns:
+                dd_data = []
+                for j, dd in enumerate(drawdowns[:5]):
+                    dd_data.append({
+                        "排名": j + 1,
+                        "开始": str(dd.get('start_date', ''))[:10],
+                        "谷底": str(dd.get('min_date', ''))[:10],
+                        "恢复": str(dd.get('end_date', ''))[:10],
+                        "深度": f"{dd.get('depth', 0):.2%}",
+                        "持续(天)": dd.get('duration', 0),
+                        "恢复(天)": dd.get('recovery_time', 0),
+                    })
+                st.dataframe(pd.DataFrame(dd_data), hide_index=True, use_container_width=True)
+        except Exception as e:
+            st.caption(f"回撤分析失败: {e}")
+
+    except Exception as e:
+        st.error(f"专业报告生成失败: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
 
-# ==================== Tab8: ETF定投 (Phase 6) ====================
+# ==================== Tab E: ETF定投（原Tab8，不变） ====================
+
 def render_etf_dip(market_code, start_date):
     st.header("💰 ETF定投策略")
     st.markdown("系统支持**定期定额(DCA)**、**价值平均(VA)**、**智能再平衡**三种定投策略")
@@ -1183,7 +1408,6 @@ def render_etf_dip(market_code, start_date):
 
                 from src.strategy.etf_strategies import ETFDollarCostAveraging, ETFValueAveraging
 
-                # 执行定投回测
                 total_invested = 0
                 total_shares = 0
                 invest_records = []
@@ -1224,11 +1448,9 @@ def render_etf_dip(market_code, start_date):
                     final_value = total_shares * final_price
                     total_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0
 
-                    # 简化IRR计算
                     n_years_actual = (df.index[-1] - df.index[0]).days / 365.25
                     irr = (final_value / total_invested) ** (1 / n_years_actual) - 1 if n_years_actual > 0 and total_invested > 0 else 0
 
-                    # 结果展示
                     currency = "$" if market_code == "US" else "¥"
                     m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("总投入", f"{currency}{total_invested:,.0f}")
@@ -1237,7 +1459,6 @@ def render_etf_dip(market_code, start_date):
                     m4.metric("IRR年化", f"{irr:+.2%}")
                     m5.metric("定投次数", f"{len(invest_records)}次")
 
-                    # 定投曲线
                     records_df['cumulative_invested'] = records_df['amount'].cumsum()
                     records_df['cumulative_shares'] = records_df['shares'].cumsum()
                     records_df['market_value'] = records_df['cumulative_shares'] * records_df['price']
@@ -1251,7 +1472,6 @@ def render_etf_dip(market_code, start_date):
                                       yaxis_title=f"金额({currency})")
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # 买入价格分布
                     fig2 = go.Figure()
                     fig2.add_trace(go.Scatter(x=records_df['date'], y=records_df['price'],
                                               mode='markers', name='买入价格',
@@ -1270,7 +1490,8 @@ def render_etf_dip(market_code, start_date):
                 st.code(traceback.format_exc())
 
 
-# ==================== Tab9: 目标导向推荐 (Phase 7) ====================
+# ==================== Tab F: 目标规划（原Tab9，不变） ====================
+
 def render_goal_planning(market_code, start_date):
     st.header("🎯 目标导向策略推荐")
     st.markdown("设定您的投资目标，系统自动匹配最优策略组合")
@@ -1316,7 +1537,6 @@ def render_goal_planning(market_code, start_date):
                             prob = strat.get('success_probability', 0)
 
                             with st.expander(f"#{i+1} {strat['name']} — 达成概率 {prob:.1%}", expanded=(i == 0)):
-                                # 评分
                                 s_cols = st.columns(5)
                                 s_cols[0].metric("总分", f"{scores.get('total', 0):.0f}/100")
                                 s_cols[1].metric("收益匹配", f"{scores.get('return_match', 0):.0f}")
@@ -1324,14 +1544,13 @@ def render_goal_planning(market_code, start_date):
                                 s_cols[3].metric("稳定性", f"{scores.get('stability', 0):.0f}")
                                 s_cols[4].metric("期限匹配", f"{scores.get('horizon_match', 0):.0f}")
 
-                                # 历史表现
                                 p_cols = st.columns(4)
                                 p_cols[0].metric("年化收益", f"{perf.get('annual_return', 0):.1%}")
                                 p_cols[1].metric("夏普比率", f"{perf.get('sharpe_ratio', 0):.2f}")
                                 p_cols[2].metric("最大回撤", f"{perf.get('max_drawdown', 0):.1%}")
                                 p_cols[3].metric("达成概率", f"{prob:.1%}")
 
-                        # 蒙特卡洛模拟可视化
+                        # 蒙特卡洛模拟
                         st.markdown("---")
                         st.subheader("📊 蒙特卡洛模拟")
 
@@ -1340,7 +1559,6 @@ def render_goal_planning(market_code, start_date):
                         ann_ret = best_perf.get('annual_return', target_return)
                         ann_vol = best_perf.get('volatility', 0.2)
 
-                        # 运行模拟
                         n_sim = 1000
                         n_months = int(time_horizon * 12)
                         monthly_ret = ann_ret / 12
@@ -1358,16 +1576,13 @@ def render_goal_planning(market_code, start_date):
                         target_value = initial_capital * (1 + target_return) ** time_horizon
                         success_count = np.sum(final_values >= target_value)
 
-                        # 模拟结果图
                         fig = go.Figure()
-                        # 画部分路径
                         for j in range(min(100, n_sim)):
                             fig.add_trace(go.Scatter(
                                 x=list(range(n_months + 1)), y=simulations[j],
                                 mode='lines', line=dict(width=0.3, color='rgba(100,149,237,0.15)'),
                                 showlegend=False
                             ))
-                        # 中位数和分位数
                         median_path = np.median(simulations, axis=0)
                         p10 = np.percentile(simulations, 10, axis=0)
                         p90 = np.percentile(simulations, 90, axis=0)
@@ -1384,7 +1599,6 @@ def render_goal_planning(market_code, start_date):
                                           height=500, xaxis_title="月份", yaxis_title="资产价值")
                         st.plotly_chart(fig, use_container_width=True)
 
-                        # 分布直方图
                         fig2 = go.Figure()
                         fig2.add_trace(go.Histogram(x=final_values, nbinsx=50,
                                                      marker_color='steelblue', name='最终价值分布'))
@@ -1396,7 +1610,6 @@ def render_goal_planning(market_code, start_date):
                                           xaxis_title="资产价值", yaxis_title="频次")
                         st.plotly_chart(fig2, use_container_width=True)
 
-                    # 推荐报告
                     report_text = result.get('report', '')
                     if report_text:
                         with st.expander("📄 详细推荐报告"):
@@ -1413,13 +1626,14 @@ def render_goal_planning(market_code, start_date):
                 st.code(traceback.format_exc())
 
 
-# ==================== Tab10: 策略优化 (Phase 9) ====================
-def render_strategy_optimization(market_code, start_date):
-    st.header("⚡ 策略优化")
+# ==================== Tab G: 策略实验室（原Tab10，不变） ====================
+
+def render_strategy_lab(market_code, start_date):
+    st.header("⚡ 策略实验室")
 
     opt_tab1, opt_tab2 = st.tabs(["ML算法对比", "策略集成"])
 
-    # ---- ML算法对比 (Phase 9.1) ----
+    # ML算法对比
     with opt_tab1:
         st.subheader("🤖 ML算法性能对比")
         st.markdown("对比 LightGBM、XGBoost、RandomForest、Ridge 四种算法的预测表现")
@@ -1438,7 +1652,6 @@ def render_strategy_optimization(market_code, start_date):
                     factored = engine.compute_all_core_factors(df)
                     factored = factored.dropna()
 
-                    # 构造目标列
                     factored['return_5d'] = factored['close'].shift(-5) / factored['close'] - 1
                     factored = factored.dropna()
 
@@ -1458,7 +1671,6 @@ def render_strategy_optimization(market_code, start_date):
                     if comparison is not None and not comparison.empty:
                         st.dataframe(comparison, use_container_width=True)
 
-                        # IC对比柱状图
                         fig = go.Figure()
                         ic_col = 'IC均值' if 'IC均值' in comparison.columns else comparison.columns[0]
                         algorithms = comparison.index.tolist()
@@ -1469,7 +1681,6 @@ def render_strategy_optimization(market_code, start_date):
                         fig.update_layout(title="ML算法 IC均值对比", yaxis_title="IC均值", height=400)
                         st.plotly_chart(fig, use_container_width=True)
 
-                        # 推荐最优算法
                         best_algo = algorithms[ic_values.index(max(ic_values))]
                         st.success(f"🏆 推荐算法: **{best_algo}** (IC均值最高)")
                     else:
@@ -1480,7 +1691,7 @@ def render_strategy_optimization(market_code, start_date):
                     import traceback
                     st.code(traceback.format_exc())
 
-    # ---- 策略集成 (Phase 9.3) ----
+    # 策略集成
     with opt_tab2:
         st.subheader("🔗 策略集成配置")
         st.markdown("组合多个子策略，提升信号稳定性")
@@ -1507,7 +1718,6 @@ def render_strategy_optimization(market_code, start_date):
                         st.error("无数据")
                         return
 
-                    # 适配可解释策略 → EnsembleStrategy 所需的 generate_signals 接口
                     class _StrategyAdapter:
                         def __init__(self, strategy, code, financial=None):
                             self._strategy = strategy
@@ -1539,13 +1749,11 @@ def render_strategy_optimization(market_code, start_date):
 
                             st.markdown(f"**{emoji} {action.upper()}** | 置信度: {confidence:.1%} | {reason}")
 
-                            # 投票细节
                             if sig.get('voting_details'):
                                 st.markdown("**投票详情:**")
                                 for detail in sig['voting_details']:
                                     st.markdown(f"  - {detail}")
 
-                            # 当前权重
                             if sig.get('current_weights'):
                                 st.markdown("**策略权重:**")
                                 weight_data = [{"策略": k, "权重": f"{v:.2%}"} for k, v in sig['current_weights'].items()]
@@ -1559,232 +1767,33 @@ def render_strategy_optimization(market_code, start_date):
                     st.code(traceback.format_exc())
 
 
-# ==================== Tab11: 专业回测报告 (Phase 9.5) ====================
-def render_professional_report(market_code, start_date):
-    st.header("📋 专业回测报告")
-    st.markdown("生成包含**30+核心指标**的机构级回测报告")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        code = st.text_input("回测标的", value="000001" if market_code == "CN" else "AAPL", key="pr_code")
-    with col2:
-        pr_start = st.date_input("开始日期", datetime(2020, 1, 1), key="pr_start")
-    with col3:
-        pr_end = st.date_input("结束日期", datetime.now(), key="pr_end")
-
-    pr_strategy = st.selectbox("回测策略", list(STRATEGY_NAMES.keys()),
-                                format_func=lambda x: STRATEGY_NAMES[x], key="pr_strategy")
-
-    if st.button("生成专业报告", type="primary", key="pr_run"):
-        with st.spinner("生成专业报告中..."):
-            try:
-                df = fetch_stock_data(code, str(pr_start), market_code)
-                if df.empty:
-                    st.error("无数据")
-                    return
-
-                df = df[df.index <= str(pr_end)]
-                strategy = get_strategy(pr_strategy)
-
-                # 执行回测生成权益曲线
-                weekly = DataFetcher.aggregate_to_weekly(df)
-                equity = [1.0]
-                trades_list = []
-
-                for i in range(20, len(weekly)):
-                    window = df[df.index <= weekly.index[i]]
-                    try:
-                        report = strategy.analyze_stock(code, window, name=code)
-                        week_return = (weekly.iloc[i]['close'] / weekly.iloc[i-1]['close'] - 1) if i > 0 else 0
-
-                        if report.action in ('buy', 'add') and report.confidence >= 60:
-                            equity.append(equity[-1] * (1 + week_return))
-                            trades_list.append({
-                                'date': weekly.index[i],
-                                'action': report.action,
-                                'price': weekly.iloc[i]['close'],
-                            })
-                        else:
-                            equity.append(equity[-1])
-                    except Exception:
-                        equity.append(equity[-1])
-
-                equity_series = pd.Series(equity[1:], index=weekly.index[20:])
-
-                # 使用专业回测报告引擎
-                from src.backtest.professional_report import ProfessionalBacktestReport
-
-                backtest_result = {
-                    'equity_curve': equity_series,
-                    'trades': trades_list,
-                    'holdings': pd.DataFrame(),
-                    'metrics': {},
-                }
-
-                # 基准（传入价格序列，与equity_curve对齐，报告内部会自行计算收益率）
-                benchmark = weekly['close'].iloc[20:]
-
-                pro_report = ProfessionalBacktestReport(backtest_result, benchmark_data=benchmark)
-                metrics = pro_report.calculate_all_metrics()
-
-                # ---- 核心指标面板 ----
-                st.subheader("📊 核心指标")
-
-                # 收益指标
-                st.markdown("**收益指标**")
-                r_cols = st.columns(5)
-                r_cols[0].metric("总收益率", f"{metrics.get('总收益率', 0):.2%}")
-                r_cols[1].metric("年化收益率", f"{metrics.get('年化收益率', 0):.2%}")
-                r_cols[2].metric("CAGR", f"{metrics.get('CAGR', 0):.2%}")
-                r_cols[3].metric("日均收益率", f"{metrics.get('日均收益率', 0):.4%}")
-                r_cols[4].metric("正收益月占比", f"{metrics.get('正收益月份占比', 0):.1%}")
-
-                # 风险指标
-                st.markdown("**风险指标**")
-                k_cols = st.columns(5)
-                k_cols[0].metric("年化波动率", f"{metrics.get('年化波动率', 0):.2%}")
-                k_cols[1].metric("最大回撤", f"{metrics.get('最大回撤', 0):.2%}")
-                k_cols[2].metric("VaR(95%)", f"{metrics.get('VaR(95%)', 0):.2%}")
-                k_cols[3].metric("CVaR(95%)", f"{metrics.get('CVaR(95%)', 0):.2%}")
-                k_cols[4].metric("下行波动率", f"{metrics.get('下行波动率', 0):.2%}")
-
-                # 风险调整收益
-                st.markdown("**风险调整收益**")
-                s_cols = st.columns(5)
-                s_cols[0].metric("夏普比率", f"{metrics.get('夏普比率', 0):.2f}")
-                s_cols[1].metric("Sortino比率", f"{metrics.get('Sortino比率', 0):.2f}")
-                s_cols[2].metric("Calmar比率", f"{metrics.get('Calmar比率', 0):.2f}")
-                s_cols[3].metric("Alpha", f"{metrics.get('Alpha', 0):.2%}")
-                s_cols[4].metric("Beta", f"{metrics.get('Beta', 0):.2f}")
-
-                # 交易指标
-                st.markdown("**交易指标**")
-                t_cols = st.columns(5)
-                t_cols[0].metric("交易次数", f"{metrics.get('交易次数', 0)}")
-                t_cols[1].metric("胜率", f"{metrics.get('胜率', 0):.1%}")
-                t_cols[2].metric("盈亏比", f"{metrics.get('盈亏比', 0):.2f}")
-                t_cols[3].metric("最大连续盈利", f"{metrics.get('最大连续盈利', 0)}")
-                t_cols[4].metric("最大连续亏损", f"{metrics.get('最大连续亏损', 0)}")
-
-                st.markdown("---")
-
-                # ---- 权益曲线 ----
-                st.subheader("📈 权益曲线")
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=equity_series.index, y=equity_series.values,
-                                         name='策略净值', line=dict(width=2)))
-                fig.update_layout(height=400, yaxis_title="净值")
-                st.plotly_chart(fig, use_container_width=True)
-
-                # ---- 月度收益表 ----
-                st.subheader("📅 月度收益表")
-                try:
-                    monthly_table = pro_report.generate_monthly_returns_table()
-                    if monthly_table is not None and not monthly_table.empty:
-                        # 热力表格: 正绿负红
-                        styled = monthly_table.style.map(
-                            lambda v: f"background-color: {'#d4edda' if isinstance(v, (int, float)) and v > 0 else '#f8d7da' if isinstance(v, (int, float)) and v < 0 else ''}"
-                        ).format("{:.2%}", na_rep="-")
-                        st.dataframe(styled, use_container_width=True)
-                except Exception as e:
-                    st.caption(f"月度收益表生成失败: {e}")
-
-                # ---- 回撤分析 ----
-                st.subheader("📉 Top 回撤事件")
-                try:
-                    drawdowns = pro_report.analyze_drawdowns()
-                    if drawdowns:
-                        dd_data = []
-                        for j, dd in enumerate(drawdowns[:5]):
-                            dd_data.append({
-                                "排名": j + 1,
-                                "开始": str(dd.get('start_date', ''))[:10],
-                                "谷底": str(dd.get('min_date', ''))[:10],
-                                "恢复": str(dd.get('end_date', ''))[:10],
-                                "深度": f"{dd.get('depth', 0):.2%}",
-                                "持续(天)": dd.get('duration', 0),
-                                "恢复(天)": dd.get('recovery_time', 0),
-                            })
-                        st.dataframe(pd.DataFrame(dd_data), hide_index=True, use_container_width=True)
-                except Exception as e:
-                    st.caption(f"回撤分析失败: {e}")
-
-            except Exception as e:
-                st.error(f"报告生成失败: {e}")
-                import traceback
-                st.code(traceback.format_exc())
-
-
-# ==================== K线图渲染 ====================
-def _render_candlestick(df, title=""):
-    """渲染K线图"""
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.03,
-                        row_heights=[0.7, 0.3])
-
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['open'], high=df['high'],
-        low=df['low'], close=df['close'], name='K线'
-    ), row=1, col=1)
-
-    # 均线
-    for period, color in [(5, '#f39c12'), (20, '#3498db'), (60, '#e74c3c')]:
-        ma = df['close'].rolling(period).mean()
-        fig.add_trace(go.Scatter(x=df.index, y=ma, name=f'MA{period}',
-                                  line=dict(width=1, color=color)), row=1, col=1)
-
-    # 成交量
-    colors = ['#e74c3c' if df['close'].iloc[i] >= df['open'].iloc[i] else '#2ecc71'
-              for i in range(len(df))]
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='成交量',
-                          marker_color=colors), row=2, col=1)
-
-    fig.update_layout(
-        title=f"📈 {title}", height=600,
-        xaxis_rangeslider_visible=False,
-        template='plotly_dark'
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
 # ==================== 主入口 ====================
 def main():
     market_code, start_date, end_date = render_sidebar()
 
-    # 存储到session
     st.session_state['market'] = market_code
 
-    # 主标签页 (11个Tab)
+    # 主标签页（7个Tab）
     tabs = st.tabs([
-        "📊 个股策略", "💼 持仓策略", "🎯 个股推荐",
-        "📈 行情分析", "🔬 因子研究", "🧪 策略回测",
-        "📝 交易记录",
-        "💰 ETF定投", "🎯 目标规划", "⚡ 策略优化",
-        "📋 专业报告",
+        "📊 个股分析", "💼 持仓管理", "🎯 市场扫描",
+        "🧪 策略回测",
+        "💰 ETF定投", "🎯 目标规划", "⚡ 策略实验室",
     ])
 
     with tabs[0]:
-        render_stock_strategy(market_code, start_date)
+        render_stock_analysis(market_code, start_date)
     with tabs[1]:
-        render_holding_strategy(market_code, start_date)
+        render_portfolio(market_code, start_date)
     with tabs[2]:
-        render_recommendations(market_code, start_date)
+        render_market_scan(market_code, start_date)
     with tabs[3]:
-        render_market_analysis(market_code, start_date)
-    with tabs[4]:
-        render_factor_research(market_code, start_date)
-    with tabs[5]:
         render_backtest(market_code, start_date)
-    with tabs[6]:
-        render_trade_records(market_code)
-    with tabs[7]:
+    with tabs[4]:
         render_etf_dip(market_code, start_date)
-    with tabs[8]:
+    with tabs[5]:
         render_goal_planning(market_code, start_date)
-    with tabs[9]:
-        render_strategy_optimization(market_code, start_date)
-    with tabs[10]:
-        render_professional_report(market_code, start_date)
+    with tabs[6]:
+        render_strategy_lab(market_code, start_date)
 
 
 if __name__ == "__main__":
