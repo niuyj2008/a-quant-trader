@@ -66,26 +66,65 @@ class DataCache:
                     PRIMARY KEY (market, code, table_name)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signal_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    market TEXT NOT NULL DEFAULT 'CN',
+                    strategy TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    confidence REAL,
+                    composite_score REAL,
+                    factor_scores TEXT,
+                    weights_version TEXT,
+                    price_at_signal REAL,
+                    return_5d REAL,
+                    return_10d REAL,
+                    return_20d REAL,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_signal_log_code_date
+                ON signal_log (code, date)
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS training_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    step TEXT NOT NULL,
+                    market TEXT NOT NULL DEFAULT 'US',
+                    strategy TEXT,
+                    method TEXT,
+                    params TEXT,
+                    result_summary TEXT,
+                    result_detail TEXT,
+                    stock_count INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
             conn.commit()
 
     # ==================== 日线数据缓存 ====================
 
     def save_daily(self, code: str, df: pd.DataFrame, market: str = "CN"):
-        """保存日线数据到缓存"""
+        """保存日线数据到缓存（批量写入优化）"""
         if df.empty:
             return
+        rows = []
+        for idx, row in df.iterrows():
+            date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
+            rows.append((market, code, date_str,
+                         float(row.get('open', 0)), float(row.get('high', 0)),
+                         float(row.get('low', 0)), float(row.get('close', 0)),
+                         float(row.get('volume', 0)), float(row.get('amount', 0)),
+                         float(row.get('turnover', 0))))
         with sqlite3.connect(self.db_path) as conn:
-            for idx, row in df.iterrows():
-                date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)
-                conn.execute("""
-                    INSERT OR REPLACE INTO daily_ohlcv
-                    (market, code, date, open, high, low, close, volume, amount, turnover)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (market, code, date_str,
-                      float(row.get('open', 0)), float(row.get('high', 0)),
-                      float(row.get('low', 0)), float(row.get('close', 0)),
-                      float(row.get('volume', 0)), float(row.get('amount', 0)),
-                      float(row.get('turnover', 0))))
+            conn.executemany("""
+                INSERT OR REPLACE INTO daily_ohlcv
+                (market, code, date, open, high, low, close, volume, amount, turnover)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
             # 更新元数据
             dates = df.index
             conn.execute("""
@@ -184,3 +223,106 @@ class DataCache:
             return pd.Series()
         df['date'] = pd.to_datetime(df['date'])
         return df.set_index('date')['value']
+
+    # ==================== 信号日志 ====================
+
+    def save_signal(self, date: str, code: str, strategy: str, action: str,
+                    confidence: float, composite_score: float,
+                    factor_scores: Optional[Dict] = None,
+                    weights_version: str = "default",
+                    price_at_signal: float = 0.0,
+                    market: str = "CN"):
+        """记录策略信号到日志"""
+        import json
+        factor_json = json.dumps(factor_scores, ensure_ascii=False) if factor_scores else None
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO signal_log
+                (date, code, market, strategy, action, confidence, composite_score,
+                 factor_scores, weights_version, price_at_signal)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (date, code, market, strategy, action, confidence, composite_score,
+                  factor_json, weights_version, price_at_signal))
+            conn.commit()
+
+    def backfill_signal_returns(self, signal_id: int, return_5d: float = None,
+                                return_10d: float = None, return_20d: float = None):
+        """回填信号的实际收益"""
+        updates = []
+        params = []
+        if return_5d is not None:
+            updates.append("return_5d = ?")
+            params.append(return_5d)
+        if return_10d is not None:
+            updates.append("return_10d = ?")
+            params.append(return_10d)
+        if return_20d is not None:
+            updates.append("return_20d = ?")
+            params.append(return_20d)
+        if not updates:
+            return
+        params.append(signal_id)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(f"UPDATE signal_log SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+
+    def load_signals(self, strategy: Optional[str] = None, code: Optional[str] = None,
+                     market: str = "CN", limit: int = 1000) -> pd.DataFrame:
+        """加载信号日志"""
+        query = "SELECT * FROM signal_log WHERE market = ?"
+        params: list = [market]
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        if code:
+            query += " AND code = ?"
+            params.append(code)
+        query += " ORDER BY date DESC LIMIT ?"
+        params.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+        return df
+
+    def get_pending_backfill_signals(self, market: str = "CN") -> pd.DataFrame:
+        """获取需要回填收益的信号（return_5d/10d/20d为NULL的记录）"""
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query("""
+                SELECT * FROM signal_log
+                WHERE market = ? AND (return_5d IS NULL OR return_10d IS NULL OR return_20d IS NULL)
+                ORDER BY date
+            """, conn, params=[market])
+        return df
+
+    # ==================== 训练历史记录 ====================
+
+    def save_training_history(self, step: str, market: str = "US",
+                              strategy: str = None, method: str = None,
+                              params: Dict = None, result_summary: str = None,
+                              result_detail: str = None, stock_count: int = 0):
+        """保存训练步骤的执行记录"""
+        import json
+        params_json = json.dumps(params, ensure_ascii=False) if params else None
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO training_history
+                (step, market, strategy, method, params, result_summary, result_detail, stock_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (step, market, strategy, method, params_json,
+                  result_summary, result_detail, stock_count))
+            conn.commit()
+
+    def load_training_history(self, step: str = None, market: str = None,
+                              limit: int = 20) -> pd.DataFrame:
+        """加载训练历史记录"""
+        query = "SELECT * FROM training_history WHERE 1=1"
+        params_list: list = []
+        if step:
+            query += " AND step = ?"
+            params_list.append(step)
+        if market:
+            query += " AND market = ?"
+            params_list.append(market)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params_list.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=params_list)

@@ -1,0 +1,131 @@
+{
+  "balanced": {
+    "weights": {
+      "rsi_14": 0.1411,
+      "momentum_5": 0.149,
+      "momentum_20": 0.2042,
+      "ma_cross": 0.1821,
+      "volatility_20": 0.1006,
+      "adx": 0.0457,
+      "volume_ratio": 0.0457,
+      "price_position": 0.1316
+    },
+    "score_ranges": {},
+    "buy_threshold": 70.0,
+    "sell_threshold": 20.0,
+    "method": "ic_ir",
+    "validation_sharpe": 0.0,
+    "original_sharpe": 0.0,
+    "improvement": 0.0,
+    "market": "US",
+    "updated_at": "2026-02-17 21:11:56",
+    "threshold_source": "grid_search"
+  },
+  "momentum": {
+    "weights": {
+      "rsi_14": 0.1411,
+      "momentum_5": 0.149,
+      "momentum_20": 0.2042,
+      "ma_cross": 0.1821,
+      "volatility_20": 0.1006,
+      "adx": 0.0457,
+      "volume_ratio": 0.0457,
+      "price_position": 0.1316
+    },
+    "score_ranges": {},
+    "buy_threshold": 80.0,
+    "sell_threshold": 20.0,
+    "method": "ic_ir",
+    "validation_sharpe": 0.0,
+    "original_sharpe": 0.0,
+    "improvement": 0.0,
+    "market": "US",
+    "updated_at": "2026-02-17 21:16:32",
+    "threshold_source": "grid_search"
+  },
+  "value": {
+    "weights": {
+      "rsi_14": 0.1299,
+      "momentum_5": 0.0833,
+      "momentum_20": 0.047,
+      "ma_cross": 0.2145,
+      "volatility_20": 0.047,
+      "adx": 0.2225,
+      "volume_ratio": 0.1902,
+      "price_position": 0.0655
+    },
+    "score_ranges": {},
+    "buy_threshold": 50.0,
+    "sell_threshold": 20.0,
+    "method": "sharpe",
+    "validation_sharpe": 0.0,
+    "original_sharpe": 0.0,
+    "improvement": 0.0,
+    "market": "US",
+    "updated_at": "2026-02-17 18:44:12",
+    "threshold_source": "grid_search"
+  },
+  "low_vol": {
+    "weights": {
+      "rsi_14": 0.0462,
+      "momentum_5": 0.0462,
+      "momentum_20": 0.238,
+      "ma_cross": 0.1569,
+      "volatility_20": 0.0903,
+      "adx": 0.2299,
+      "volume_ratio": 0.0719,
+      "price_position": 0.1207
+    },
+    "score_ranges": {},
+    "buy_threshold": 65.0,
+    "sell_threshold": 35.0,
+    "method": "sharpe",
+    "validation_sharpe": 0.0,
+    "original_sharpe": 0.0,
+    "improvement": 0.0,
+    "market": "US",
+    "updated_at": "2026-02-17 20:35:04"
+  },
+  "reversion": {
+    "weights": {
+      "rsi_14": 0.153,
+      "momentum_5": 0.2096,
+      "momentum_20": 0.131,
+      "ma_cross": 0.0448,
+      "volatility_20": 0.2107,
+      "adx": 0.0448,
+      "volume_ratio": 0.1613,
+      "price_position": 0.0448
+    },
+    "score_ranges": {},
+    "buy_threshold": 65.0,
+    "sell_threshold": 35.0,
+    "method": "sharpe",
+    "validation_sharpe": 0.0,
+    "original_sharpe": 0.0,
+    "improvement": 0.0,
+    "market": "US",
+    "updated_at": "2026-02-17 20:51:58"
+  },
+  "breakout": {
+    "weights": {
+      "rsi_14": 0.125,
+      "momentum_5": 0.125,
+      "momentum_20": 0.125,
+      "ma_cross": 0.125,
+      "volatility_20": 0.125,
+      "adx": 0.125,
+      "volume_ratio": 0.125,
+      "price_position": 0.125
+    },
+    "score_ranges": {},
+    "buy_threshold": 65.0,
+    "sell_threshold": 35.0,
+    "method": "sharpe",
+    "validation_sharpe": 0.0,
+    "original_sharpe": 0.0,
+    "improvement": 0.0,
+    "market": "US",
+    "updated_at": "2026-02-17 21:11:00"
+  }
+}

@@ -92,8 +92,15 @@ US_ETF_POOL = [
 ]
 
 
-def get_stock_pool(market_code: str) -> List[str]:
-    """获取默认股票池"""
+def get_stock_pool(market_code: str, size: str = "default") -> List[str]:
+    """获取默认股票池
+
+    Args:
+        market_code: 市场代码 CN / US
+        size: 股票池大小
+            - "default": 默认精选池（30-40只）
+            - "sp500": 美股S&P 500训练池（约500只，仅US市场）
+    """
     if market_code == "CN":
         return [
             # 沪深300 部分代表性个股
@@ -106,6 +113,8 @@ def get_stock_pool(market_code: str) -> List[str]:
             "601225", "601288", "601318", "601398", "601601",
             "601628", "601668", "601688", "601857", "601988",
         ]
+    elif market_code == "US" and size == "sp500":
+        return _get_sp500_pool()
     else:
         return [
             # 美股精选 — 大盘科技 + 价值蓝筹
@@ -116,6 +125,66 @@ def get_stock_pool(market_code: str) -> List[str]:
             "BAC", "CRM", "KO", "PEP", "MRK",
             "AMD", "NFLX", "INTC", "DIS", "CSCO",
         ]
+
+
+def _get_sp500_pool() -> List[str]:
+    """获取S&P 500成分股列表（用于训练数据集）
+
+    优先从Wikipedia动态获取，失败时使用静态列表作为fallback。
+    """
+    try:
+        import pandas as pd
+        table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        df = table[0]
+        symbols = df['Symbol'].str.replace('.', '-', regex=False).tolist()
+        if len(symbols) >= 400:
+            return symbols
+    except Exception:
+        pass
+
+    # 静态fallback: S&P 500代表性成分股（按行业分散，约200只覆盖主要行业）
+    return [
+        # 信息技术 (约50只)
+        "AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "AMD", "ADBE", "CSCO", "ACN",
+        "INTC", "IBM", "INTU", "TXN", "QCOM", "AMAT", "NOW", "PANW", "ADI", "LRCX",
+        "MU", "KLAC", "SNPS", "CDNS", "MCHP", "MSI", "APH", "FTNT", "ROP", "TEL",
+        "NXPI", "IT", "ANSS", "KEYS", "HPQ", "CDW", "ON", "FSLR", "GEN", "MPWR",
+        "ZBRA", "TYL", "TRMB", "PTC", "EPAM", "JNPR", "AKAM", "SWKS", "FFIV", "WDC",
+        # 通信服务 (约15只)
+        "META", "GOOGL", "GOOG", "NFLX", "DIS", "CMCSA", "T", "VZ", "TMUS", "CHTR",
+        "EA", "TTWO", "WBD", "MTCH", "LYV",
+        # 非必需消费品 (约30只)
+        "AMZN", "TSLA", "HD", "MCD", "NKE", "LOW", "SBUX", "TJX", "BKNG", "ABNB",
+        "CMG", "ORLY", "AZO", "ROST", "DHI", "LEN", "GM", "F", "MAR", "HLT",
+        "YUM", "DARDEN", "DPZ", "POOL", "BBY", "ULTA", "EBAY", "ETSY", "APTV", "MGM",
+        # 金融 (约40只)
+        "BRK-B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "SPGI", "BLK",
+        "C", "AXP", "SCHW", "CB", "MMC", "PGR", "AON", "ICE", "CME", "MCO",
+        "USB", "TFC", "PNC", "AIG", "MET", "PRU", "AFL", "TRV", "ALL", "CINF",
+        "COF", "DFS", "SYF", "FIS", "FISV", "GPN", "PYPL", "AMP", "BEN", "IVZ",
+        # 医疗保健 (约35只)
+        "UNH", "LLY", "JNJ", "ABBV", "MRK", "TMO", "ABT", "PFE", "DHR", "BMY",
+        "AMGN", "MDT", "ISRG", "ELV", "GILD", "CVS", "CI", "VRTX", "REGN", "SYK",
+        "ZTS", "BDX", "BSX", "HCA", "EW", "IDXX", "DXCM", "IQV", "A", "MTD",
+        "HOLX", "ALGN", "TECH", "CRL", "CTLT",
+        # 工业 (约35只)
+        "CAT", "RTX", "UNP", "HON", "DE", "BA", "GE", "LMT", "UPS", "ADP",
+        "ETN", "ITW", "EMR", "FDX", "MMM", "CSX", "NSC", "WM", "RSG", "GD",
+        "NOC", "TT", "PH", "ROK", "FAST", "VRSK", "CTAS", "PAYX", "CPRT", "ODFL",
+        "IR", "WAB", "AME", "DOV", "SWK",
+        # 必需消费品 (约20只)
+        "PG", "KO", "PEP", "COST", "WMT", "PM", "MO", "MDLZ", "CL", "KMB",
+        "GIS", "K", "SYY", "HSY", "ADM", "STZ", "MKC", "CHD", "CAG", "SJM",
+        # 能源 (约15只)
+        "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "PXD", "OXY",
+        "HES", "DVN", "FANG", "HAL", "BKR",
+        # 公用事业 (约10只)
+        "NEE", "SO", "DUK", "D", "AEP", "SRE", "EXC", "XEL", "WEC", "ED",
+        # 房地产 (约10只)
+        "PLD", "AMT", "CCI", "EQIX", "PSA", "SPG", "O", "WELL", "DLR", "AVB",
+        # 原材料 (约10只)
+        "LIN", "APD", "SHW", "ECL", "FCX", "NEM", "NUE", "DOW", "DD", "VMC",
+    ]
 
 
 def get_etf_pool(market_code: str) -> List[str]:

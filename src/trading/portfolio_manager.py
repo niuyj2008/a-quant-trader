@@ -328,6 +328,7 @@ class PortfolioManager:
                     rebalance_plan.append({
                         'action': 'buy',
                         'code': code,
+                        'price': current_price,
                         'shares': shares_diff,
                         'amount': shares_diff * current_price,
                         'reason': f'调整至目标权重{target_weight:.1%}',
@@ -336,6 +337,7 @@ class PortfolioManager:
                     rebalance_plan.append({
                         'action': 'sell',
                         'code': code,
+                        'price': current_price,
                         'shares': abs(shares_diff),
                         'amount': abs(shares_diff) * current_price,
                         'reason': f'调整至目标权重{target_weight:.1%}',

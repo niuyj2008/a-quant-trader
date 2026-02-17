@@ -4,11 +4,29 @@
 支持多数据源切换、周线聚合、基本面/宏观/情绪数据获取
 """
 
+import time
+import functools
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Union
+from typing import Optional, List, Dict, Union, Callable
 from loguru import logger
+
+
+def rate_limit(min_interval: float = 0.5):
+    """限流装饰器：确保两次调用之间至少间隔 min_interval 秒"""
+    def decorator(func: Callable) -> Callable:
+        last_call_time = [0.0]
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = time.time() - last_call_time[0]
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
+            last_call_time[0] = time.time()
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 try:
     import akshare as ak
@@ -114,25 +132,68 @@ class DataFetcher:
     def get_daily_data(self, code: str, start_date: Optional[str] = None,
                        end_date: Optional[str] = None, adjust: str = "qfq",
                        market: str = "CN") -> pd.DataFrame:
-        """获取日线数据（带缓存）"""
-        # 尝试缓存
+        """获取日线数据（带缓存 + 增量更新）"""
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        req_end = end_date or today_str
+
+        # 增量更新逻辑：检查缓存是否已覆盖所需范围
         if self.use_cache and self.cache:
-            cached = self.cache.load_daily(code, start_date, end_date, market)
-            if not cached.empty:
-                logger.debug(f"缓存命中: {market}/{code} {len(cached)}条")
-                # Phase 8: 验证缓存数据
-                if self.enable_validation:
-                    validation_result = self.validator.validate_price_data(cached, code, market)
-                    if not validation_result['is_valid']:
-                        logger.warning(f"缓存数据验证失败: {validation_result['issues']}, 重新获取")
-                        # 清除无效缓存
-                        self.cache.clear_daily(code, market)
+            cache_range = self.cache.get_cache_range(code, market)
+            if cache_range:
+                cache_start, cache_end = cache_range
+                # 如果缓存已覆盖请求范围（或距今≤1天），直接返回
+                if cache_end >= req_end or (
+                    not end_date and cache_end >= (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+                ):
+                    cached = self.cache.load_daily(code, start_date, end_date, market)
+                    if not cached.empty:
+                        logger.debug(f"缓存命中: {market}/{code} {len(cached)}条")
+                        if self.enable_validation:
+                            validation_result = self.validator.validate_price_data(cached, code, market)
+                            if not validation_result['is_valid']:
+                                logger.warning(f"缓存数据验证失败: {validation_result['issues']}, 重新获取")
+                                self.cache.clear_daily(code, market)
+                            else:
+                                return cached
+                        else:
+                            return cached
+
+                # 缓存存在但不够新：增量拉取缺失部分
+                elif cache_end < req_end:
+                    incr_start = (datetime.strptime(cache_end, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                    logger.debug(f"增量更新: {market}/{code} 从 {incr_start} 到 {req_end}")
+                    try:
+                        if market == "US":
+                            incr_df = self._get_daily_us(code, incr_start, req_end)
+                        elif self.source == "akshare":
+                            incr_df = self._get_daily_akshare(code, incr_start, req_end, adjust)
+                        else:
+                            incr_df = self._get_daily_tushare(code, incr_start, req_end, adjust)
+
+                        if not incr_df.empty:
+                            self.cache.save_daily(code, incr_df, market)
+                        # 返回完整范围
+                        return self.cache.load_daily(code, start_date, end_date, market)
+                    except Exception as e:
+                        logger.warning(f"增量更新失败: {e}, 使用已有缓存")
+                        cached = self.cache.load_daily(code, start_date, end_date, market)
+                        if not cached.empty:
+                            return cached
+
+            # 缓存中无此股票数据，但有缓存框架：尝试直接加载
+            else:
+                cached = self.cache.load_daily(code, start_date, end_date, market)
+                if not cached.empty:
+                    if self.enable_validation:
+                        validation_result = self.validator.validate_price_data(cached, code, market)
+                        if not validation_result['is_valid']:
+                            self.cache.clear_daily(code, market)
+                        else:
+                            return cached
                     else:
                         return cached
-                else:
-                    return cached
 
-        # 从数据源获取
+        # 从数据源全量获取
         if market == "US":
             df = self._get_daily_us(code, start_date, end_date)
         elif self.source == "akshare":
@@ -142,14 +203,12 @@ class DataFetcher:
 
         # Phase 8: 验证获取的数据
         if self.enable_validation and not df.empty:
-            # 标记数据来源
             df.attrs['source'] = self.source if market == 'CN' else 'yfinance'
             df.attrs['fetch_time'] = datetime.now().isoformat()
 
             validation_result = self.validator.validate_price_data(df, code, market)
             if not validation_result['is_valid']:
                 logger.error(f"数据验证失败 [{code}]: {validation_result['issues']}")
-                # 严重错误时返回空DataFrame
                 if any('High < Low' in issue or '负数或0价格' in issue
                        for issue in validation_result['issues']):
                     logger.error("数据包含严重错误,拒绝使用")
@@ -224,9 +283,10 @@ class DataFetcher:
         result.sort_index(inplace=True)
         return result
 
+    @rate_limit(min_interval=0.3)
     def _get_daily_us(self, code: str, start_date: Optional[str],
                       end_date: Optional[str]) -> pd.DataFrame:
-        """使用yfinance获取美股日线数据"""
+        """使用yfinance获取美股日线数据（带限流）"""
         if yf is None:
             raise ImportError("yfinance未安装")
         df = yf.download(code, start=start_date, end=end_date, progress=False)
@@ -293,14 +353,34 @@ class DataFetcher:
 
     def get_financial_data(self, code: str, market: str = "CN") -> Dict:
         """
-        获取股票基本面数据
+        获取股票基本面数据（带缓存）
 
         Returns:
             Dict with pe, pb, roe, revenue_growth, gross_margin, etc.
         """
+        # 尝试从缓存加载（7天内有效）
+        if self.use_cache and self.cache:
+            cached = self.cache.load_financial(code, market)
+            if not cached.empty:
+                latest = cached.iloc[-1]
+                cache_date = str(latest.get('date', ''))
+                if cache_date and (datetime.now() - datetime.strptime(cache_date, '%Y-%m-%d')).days < 7:
+                    result = {col: latest[col] for col in cached.columns
+                              if col not in ('market', 'code', 'date') and pd.notna(latest[col])}
+                    if result:
+                        logger.debug(f"财务数据缓存命中: {market}/{code}")
+                        return result
+
         if market == "US":
-            return self._get_financial_us(code)
-        return self._get_financial_cn(code)
+            data = self._get_financial_us(code)
+        else:
+            data = self._get_financial_cn(code)
+
+        # 写入缓存
+        if self.use_cache and self.cache and data:
+            self.cache.save_financial(code, data, datetime.now().strftime('%Y-%m-%d'), market)
+
+        return data
 
     def _get_financial_cn(self, code: str) -> Dict:
         """获取A股基本面数据"""
@@ -672,6 +752,117 @@ class DataFetcher:
                 raise e
         else:
             raise NotImplementedError("Tushare指数数据接口待实现")
+
+    # ==================== 批量下载 ====================
+
+    def batch_download(self, stock_list: List[str], years: int = 10,
+                       market: str = "US", include_financial: bool = True,
+                       progress_callback=None) -> Dict[str, Dict]:
+        """批量下载历史数据（用于训练数据集构建）
+
+        智能跳过已有充足缓存的股票，仅下载缺失数据。
+        判断标准：缓存数据≥ years*200 行且最新数据距今≤7天 → 直接使用缓存。
+
+        Args:
+            stock_list: 股票代码列表
+            years: 历史年数
+            market: 市场代码
+            include_financial: 是否同时获取财务数据
+            progress_callback: 进度回调函数 callback(current, total, code, status)
+
+        Returns:
+            Dict[code -> {"daily": DataFrame, "financial": Dict, "status": str}]
+        """
+        results = {}
+        total = len(stock_list)
+        success = 0
+        failed = 0
+        cached_hit = 0
+        min_rows = years * 200  # 每年约252交易日，200为保守阈值
+        fresh_threshold = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
+        logger.info(f"开始批量下载: {total}只股票, {years}年历史, 市场={market}")
+
+        for i, code in enumerate(stock_list):
+            status = "success"
+            try:
+                # 先检查缓存是否已有充足数据
+                cache_used = False
+                if self.use_cache and self.cache:
+                    cache_range = self.cache.get_cache_range(code, market)
+                    if cache_range:
+                        cache_start, cache_end = cache_range
+                        # 缓存数据够新（7天内）则直接加载
+                        if cache_end >= fresh_threshold:
+                            cached_df = self.cache.load_daily(code, None, None, market)
+                            if not cached_df.empty and len(cached_df) >= min_rows:
+                                df = cached_df
+                                status = "success"
+                                success += 1
+                                cached_hit += 1
+                                cache_used = True
+                                logger.debug(f"[{i+1}/{total}] {code} 缓存命中 ({len(df)}行)")
+
+                if not cache_used:
+                    # 缓存不足或不够新，执行下载/增量更新（带超时保护）
+                    import signal as _signal
+                    import threading
+
+                    df = pd.DataFrame()
+                    _download_timeout = 30  # 每只股票最多30秒
+
+                    def _do_download():
+                        nonlocal df
+                        df = self.get_long_history(code, years=years, market=market)
+
+                    t = threading.Thread(target=_do_download)
+                    t.start()
+                    t.join(timeout=_download_timeout)
+                    if t.is_alive():
+                        logger.warning(f"[{i+1}/{total}] {code} 下载超时({_download_timeout}s)，跳过")
+                        status = "skipped"
+                        failed += 1
+                        # 尝试使用已有缓存（即使不完整）
+                        if self.use_cache and self.cache:
+                            cached_df = self.cache.load_daily(code, None, None, market)
+                            if not cached_df.empty:
+                                df = cached_df
+                                status = "success"
+                                success += 1
+                                failed -= 1
+                    elif df.empty:
+                        status = "skipped"
+                        failed += 1
+                    else:
+                        status = "success"
+                        success += 1
+
+                result_entry = {"daily": df, "financial": {}, "status": status, "rows": len(df)}
+
+                # 财务数据
+                if include_financial and not df.empty:
+                    try:
+                        fin = self.get_financial_data(code, market=market)
+                        result_entry["financial"] = fin
+                    except Exception:
+                        pass
+
+                results[code] = result_entry
+
+            except Exception as e:
+                status = "failed"
+                results[code] = {"daily": pd.DataFrame(), "financial": {}, "status": status, "rows": 0}
+                failed += 1
+                logger.warning(f"[{i+1}/{total}] {code} 失败: {e}")
+
+            if progress_callback:
+                progress_callback(i + 1, total, code, status)
+
+            if (i + 1) % 50 == 0:
+                logger.info(f"进度: {i+1}/{total}, 成功={success}, 缓存命中={cached_hit}, 失败={failed}")
+
+        logger.info(f"批量下载完成: 成功={success}, 缓存命中={cached_hit}, 失败={failed}, 总计={total}")
+        return results
 
     # ==================== 工具方法 ====================
 

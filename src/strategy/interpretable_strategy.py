@@ -106,11 +106,78 @@ class StockSignal:
 class BaseInterpretableStrategy(ABC):
     """可解释策略基类"""
 
+    # 策略key → 类的映射，子类注册后用于配置加载
+    _strategy_key: str = ""
+
     def __init__(self, name: str, description: str, params: Optional[Dict] = None):
         self.name = name
         self.description = description
         self.params = params or {}
         self.factor_engine = FactorEngine()
+        self.config_version = "default"  # 权重版本标识
+        # 尝试从配置文件加载优化后的参数
+        self._load_config()
+
+    def _load_config(self, config_path: str = "config/strategy_weights.json"):
+        """从配置文件加载优化后的参数（权重、阈值、评分区间）
+
+        配置文件由 WeightOptimizer.save_config() 生成。
+        如果配置不存在或加载失败，保留硬编码默认值作为fallback。
+        """
+        import json
+        from pathlib import Path
+
+        path = Path(config_path)
+        if not path.exists() or not self._strategy_key:
+            return
+
+        try:
+            with open(path) as f:
+                config = json.load(f)
+
+            if self._strategy_key not in config:
+                return
+
+            cfg = config[self._strategy_key]
+
+            # 加载权重
+            if 'weights' in cfg:
+                self.params['optimized_weights'] = cfg['weights']
+
+            # 加载买卖阈值
+            if 'buy_threshold' in cfg:
+                self.params['buy_threshold'] = cfg['buy_threshold']
+            if 'sell_threshold' in cfg:
+                self.params['sell_threshold'] = cfg['sell_threshold']
+
+            # 加载评分区间
+            if 'score_ranges' in cfg:
+                self.params['score_ranges'] = cfg['score_ranges']
+
+            self.config_version = cfg.get('updated_at', 'config')
+            logger.debug(f"策略 [{self._strategy_key}] 已加载优化配置 (版本: {self.config_version})")
+
+        except Exception as e:
+            logger.debug(f"策略 [{self._strategy_key}] 配置加载失败，使用默认值: {e}")
+
+    def _get_threshold(self, key: str, default: float) -> float:
+        """获取阈值，优先使用配置值，fallback到默认值"""
+        return self.params.get(key, default)
+
+    def _get_weight(self, factor_name: str, default: float) -> float:
+        """获取因子权重，优先使用优化权重"""
+        optimized = self.params.get('optimized_weights', {})
+        return optimized.get(factor_name, default)
+
+    def _get_score_range(self, factor_name: str, default_low: float,
+                         default_high: float) -> tuple:
+        """获取评分区间，优先使用自适应区间"""
+        ranges = self.params.get('score_ranges', {})
+        if factor_name in ranges:
+            r = ranges[factor_name]
+            if isinstance(r, (list, tuple)) and len(r) == 2:
+                return r[0], r[1]
+        return default_low, default_high
 
     @abstractmethod
     def analyze_stock(self, code: str, df: pd.DataFrame,
@@ -212,6 +279,8 @@ class BalancedMultiFactorStrategy(BaseInterpretableStrategy):
     综合技术面、动量、波动率等多维因子打分，等权加权。
     适合追求稳健收益的投资者。
     """
+
+    _strategy_key = "balanced"
 
     def __init__(self):
         super().__init__(
@@ -366,11 +435,14 @@ class MomentumTrendStrategy(BaseInterpretableStrategy):
     适合追求超额收益的投资者。
     """
 
+    _strategy_key = "momentum"
+
     def __init__(self):
         super().__init__(
             name="动量趋势策略",
             description="跟踪中短期价格趋势，顺势而为，适合追求超额收益",
-            params={"momentum_period": 20, "confirm_period": 5}
+            params={"momentum_period": 20, "confirm_period": 5,
+                    "buy_threshold": 65, "sell_threshold": 35}
         )
 
     def analyze_stock(self, code: str, df: pd.DataFrame,
@@ -430,14 +502,17 @@ class MomentumTrendStrategy(BaseInterpretableStrategy):
         trend_aligned = (m5 > 0 and m20 > 0 and ma_cross > 0)
         trend_broken = (m5 < 0 and m20 < -0.05)
 
-        if composite >= 65 and trend_aligned:
+        buy_th = self._get_threshold('buy_threshold', 65)
+        sell_th = self._get_threshold('sell_threshold', 35)
+
+        if composite >= buy_th and trend_aligned:
             report.action = "buy"
             report.action_cn = "买入"
             report.reasoning = [
                 f"多周期动量一致向上(5日:{m5:.1%}, 20日:{m20:.1%})",
                 f"均线多头排列确认趋势",
             ]
-        elif composite <= 35 or trend_broken:
+        elif composite <= sell_th or trend_broken:
             report.action = "sell"
             report.action_cn = "卖出"
             report.reasoning = ["趋势动量减弱或反转，建议离场"]
@@ -472,10 +547,13 @@ class ValueInvestStrategy(BaseInterpretableStrategy):
     适合长期持有、注重安全边际的投资者。
     """
 
+    _strategy_key = "value"
+
     def __init__(self):
         super().__init__(
             name="价值投资策略",
             description="聚焦低估值高质量公司，注重安全边际，适合长线持有",
+            params={"buy_threshold": 65, "sell_threshold": 35}
         )
 
     def analyze_stock(self, code: str, df: pd.DataFrame,
@@ -544,7 +622,10 @@ class ValueInvestStrategy(BaseInterpretableStrategy):
         report.score = composite
         report.confidence = composite
 
-        if composite >= 65:
+        buy_th = self._get_threshold('buy_threshold', 65)
+        sell_th = self._get_threshold('sell_threshold', 35)
+
+        if composite >= buy_th:
             report.action = "buy"
             report.action_cn = "买入"
             report.reasoning = []
@@ -554,7 +635,7 @@ class ValueInvestStrategy(BaseInterpretableStrategy):
                 report.reasoning.append(f"盈利能力优秀 (ROE得分{scores['ROE盈利能力']:.0f})")
             if not report.reasoning:
                 report.reasoning.append("综合价值评估显示当前处于低估区间")
-        elif composite <= 35:
+        elif composite <= sell_th:
             report.action = "sell"
             report.action_cn = "卖出"
             report.reasoning = ["估值偏高或基本面转弱，建议卖出"]
@@ -578,10 +659,13 @@ class LowVolDefenseStrategy(BaseInterpretableStrategy):
     适合风险厌恶型投资者，追求稳健收益。
     """
 
+    _strategy_key = "low_vol"
+
     def __init__(self):
         super().__init__(
             name="低波动防御策略",
             description="选择低波动标的，控制回撤，适合风险厌恶型投资者",
+            params={"buy_threshold": 65, "sell_threshold": 35}
         )
 
     def analyze_stock(self, code: str, df: pd.DataFrame,
@@ -649,12 +733,15 @@ class LowVolDefenseStrategy(BaseInterpretableStrategy):
         report.score = composite
         report.confidence = composite
 
-        if composite >= 65:
+        buy_th = self._get_threshold('buy_threshold', 65)
+        sell_th = self._get_threshold('sell_threshold', 35)
+
+        if composite >= buy_th:
             report.action = "buy"
             report.action_cn = "买入"
             report.reasoning = [f"波动率低({vol20:.2%})，风险可控",
                                 f"下行风险小，适合防御配置"]
-        elif composite <= 35:
+        elif composite <= sell_th:
             report.action = "sell"
             report.action_cn = "卖出"
             report.reasoning = ["波动率升高或趋势转弱，不再适合防御配置"]
@@ -678,10 +765,13 @@ class MeanReversionStrategy(BaseInterpretableStrategy):
     适合震荡市，有较高的纪律要求。
     """
 
+    _strategy_key = "reversion"
+
     def __init__(self):
         super().__init__(
             name="均值回归策略",
             description="逆向投资，超卖买入超买卖出，适合震荡市",
+            params={"buy_threshold": 70, "sell_threshold": 30}
         )
 
     def analyze_stock(self, code: str, df: pd.DataFrame,
@@ -748,12 +838,15 @@ class MeanReversionStrategy(BaseInterpretableStrategy):
         report.score = composite
         report.confidence = composite
 
-        if composite >= 70 and rsi < 35:
+        buy_th = self._get_threshold('buy_threshold', 70)
+        sell_th = self._get_threshold('sell_threshold', 30)
+
+        if composite >= buy_th and rsi < 35:
             report.action = "buy"
             report.action_cn = "买入"
             report.reasoning = [f"RSI严重超卖({rsi:.0f})，均值回归概率高",
                                 f"价格位于近期底部区域(位置{pos:.0%})"]
-        elif composite <= 30 or rsi > 75:
+        elif composite <= sell_th or rsi > 75:
             report.action = "sell"
             report.action_cn = "卖出"
             report.reasoning = [f"RSI超买({rsi:.0f})或价格过高，反转风险大"]
@@ -778,10 +871,13 @@ class TechnicalBreakoutStrategy(BaseInterpretableStrategy):
     适合短中线操作的投资者。
     """
 
+    _strategy_key = "breakout"
+
     def __init__(self):
         super().__init__(
             name="技术突破策略",
             description="捕捉价格突破和放量确认信号，适合中短线操作",
+            params={"buy_threshold": 70, "sell_threshold": 35}
         )
 
     def analyze_stock(self, code: str, df: pd.DataFrame,
@@ -862,14 +958,17 @@ class TechnicalBreakoutStrategy(BaseInterpretableStrategy):
         report.score = composite
         report.confidence = composite
 
-        if composite >= 70 and scores['阻力突破'] >= 70 and scores['放量确认'] >= 60:
+        buy_th = self._get_threshold('buy_threshold', 70)
+        sell_th = self._get_threshold('sell_threshold', 35)
+
+        if composite >= buy_th and scores['阻力突破'] >= 70 and scores['放量确认'] >= 60:
             report.action = "buy"
             report.action_cn = "买入"
             report.reasoning = [
                 "价格突破或接近关键阻力位",
                 f"成交量放大确认(量比{vol_ratio:.1f})",
             ]
-        elif composite <= 35:
+        elif composite <= sell_th:
             report.action = "sell"
             report.action_cn = "卖出"
             report.reasoning = ["突破失败或跌破支撑位"]

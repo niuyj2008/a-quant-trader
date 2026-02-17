@@ -36,6 +36,8 @@ from src.strategy.interpretable_strategy import (
     DecisionReport,
 )
 from src.trading.trade_journal import TradeJournal
+from src.strategy.strategy_router import StrategyRouter
+from loguru import logger
 
 # ==================== 页面配置 ====================
 st.set_page_config(
@@ -423,13 +425,20 @@ def render_stock_analysis(market_code, start_date):
             code = st.text_input("🔍 输入美股代码", value="AAPL", placeholder="如: AAPL, MSFT", key="sa_code")
     with col2:
         strategy_keys = list(STRATEGY_NAMES.keys())
-        selected_strategies = st.multiselect(
-            "📋 选择策略",
-            strategy_keys,
-            default=strategy_keys,
-            format_func=lambda x: f"{STRATEGY_NAMES[x]} ({STRATEGY_RISK_LEVELS[x]}风险)",
-            key="sa_strategies"
+        strategy_mode = st.radio(
+            "选择模式", ["🤖 智能推荐", "📋 手动选择"],
+            horizontal=True, key="sa_mode"
         )
+        if strategy_mode == "📋 手动选择":
+            selected_strategies = st.multiselect(
+                "📋 选择策略",
+                strategy_keys,
+                default=strategy_keys,
+                format_func=lambda x: f"{STRATEGY_NAMES[x]} ({STRATEGY_RISK_LEVELS[x]}风险)",
+                key="sa_strategies"
+            )
+        else:
+            selected_strategies = strategy_keys  # 智能推荐模式下仍跑全部，但高亮推荐的
     with col3:
         analyze_btn = st.button("🚀 开始分析", type="primary", use_container_width=True, key="sa_analyze")
 
@@ -497,6 +506,30 @@ def render_stock_analysis(market_code, start_date):
 
             st.markdown("---")
 
+            # 智能推荐模式：显示路由建议
+            if strategy_mode == "🤖 智能推荐":
+                try:
+                    router = StrategyRouter()
+                    routing = router.recommend(code, df, financial_data=financial)
+                    rec_col1, rec_col2 = st.columns([3, 2])
+                    with rec_col1:
+                        st.info(
+                            f"🤖 **智能推荐：{STRATEGY_NAMES.get(routing.primary_strategy, routing.primary_strategy)}** "
+                            f"(置信度 {routing.confidence:.0f})\n\n"
+                            f"理由：{routing.primary_reason}"
+                        )
+                    with rec_col2:
+                        if routing.secondary_strategy:
+                            st.caption(
+                                f"次选：{STRATEGY_NAMES.get(routing.secondary_strategy, routing.secondary_strategy)} — "
+                                f"{routing.secondary_reason}"
+                            )
+                        if routing.excluded_strategies:
+                            st.caption(f"不推荐：{', '.join(STRATEGY_NAMES.get(s, s) for s in routing.excluded_strategies)}")
+                        st.caption(f"市场状态：{routing.market_regime}")
+                except Exception as e:
+                    logger.debug(f"智能推荐失败: {e}")
+
             # === 三个子Tab ===
             sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📋 策略信号", "📈 行情走势", "🔬 因子研究"])
 
@@ -535,6 +568,27 @@ def _render_strategy_signals_panel(code, df, financial, selected_strategies, mar
     if not results:
         st.error("所有策略分析均失败")
         return
+
+    # 自动记录信号到signal_log
+    try:
+        from src.data.data_cache import DataCache
+        cache = DataCache()
+        for key, report in results.items():
+            strategy = get_strategy(key)
+            cache.save_signal(
+                date=report.date if hasattr(report, 'date') and report.date else datetime.now().strftime('%Y-%m-%d'),
+                code=code,
+                strategy=key,
+                action=report.action,
+                confidence=report.confidence,
+                composite_score=report.score,
+                factor_scores=report.factor_scores if hasattr(report, 'factor_scores') else None,
+                weights_version=strategy.config_version if hasattr(strategy, 'config_version') else "default",
+                price_at_signal=report.current_price if hasattr(report, 'current_price') and report.current_price else 0.0,
+                market=market_code,
+            )
+    except Exception as sig_e:
+        logger.debug(f"信号记录失败: {sig_e}")
 
     # 策略结果概览
     st.subheader("📋 策略信号概览")
@@ -740,7 +794,9 @@ def render_portfolio(market_code, start_date):
     """持仓管理 — 持仓总览、策略分析、交易记录"""
     st.header("💼 持仓管理")
 
-    sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📊 持仓总览", "📋 策略分析", "📝 交易记录"])
+    sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs([
+        "📊 持仓总览", "📋 策略分析", "📝 交易记录", "📡 信号日志"
+    ])
 
     with sub_tab1:
         _render_portfolio_dashboard(market_code, start_date)
@@ -751,6 +807,98 @@ def render_portfolio(market_code, start_date):
     with sub_tab3:
         _render_trade_records(market_code)
 
+    with sub_tab4:
+        _render_signal_log_panel(market_code)
+
+
+def _render_signal_log_panel(market_code):
+    """信号日志面板 — 历史信号记录、统计、胜率分析"""
+    st.subheader("📡 信号日志")
+    st.markdown("自动记录的所有策略信号，包括操作、信号强度和实际收益。")
+
+    try:
+        from src.data.data_cache import DataCache
+        cache = DataCache()
+        signals = cache.load_signals(market=market_code, limit=5000)
+
+        if signals.empty:
+            st.info("暂无信号记录。在「个股分析」中分析股票时会自动记录信号。")
+            return
+
+        # 筛选器
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            strategies = signals['strategy'].unique().tolist()
+            sel_strategy = st.selectbox("筛选策略", ["全部"] + strategies, key="sl_strategy")
+        with col2:
+            codes = signals['code'].unique().tolist()
+            sel_code = st.selectbox("筛选股票", ["全部"] + codes, key="sl_code")
+        with col3:
+            sel_action = st.selectbox("筛选操作", ["全部", "buy", "sell", "hold", "add", "reduce"],
+                                      key="sl_action")
+
+        filtered = signals.copy()
+        if sel_strategy != "全部":
+            filtered = filtered[filtered['strategy'] == sel_strategy]
+        if sel_code != "全部":
+            filtered = filtered[filtered['code'] == sel_code]
+        if sel_action != "全部":
+            filtered = filtered[filtered['action'] == sel_action]
+
+        # 统计概览
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("信号总数", len(filtered))
+        with col2:
+            buy_signals = len(filtered[filtered['action'].isin(['buy', 'add'])])
+            st.metric("买入信号", buy_signals)
+        with col3:
+            sell_signals = len(filtered[filtered['action'].isin(['sell', 'reduce'])])
+            st.metric("卖出信号", sell_signals)
+        with col4:
+            if 'return_5d' in filtered.columns:
+                filled = filtered[filtered['return_5d'].notna()]
+                if len(filled) > 0:
+                    buy_filled = filled[filled['action'].isin(['buy', 'add'])]
+                    if len(buy_filled) > 0:
+                        win_rate = (buy_filled['return_5d'] > 0).mean()
+                        st.metric("买入5日胜率", f"{win_rate:.1%}")
+                    else:
+                        st.metric("买入5日胜率", "-")
+                else:
+                    st.metric("买入5日胜率", "待回填")
+            else:
+                st.metric("买入5日胜率", "-")
+
+        # 各策略信号分布
+        st.markdown("**各策略信号分布**")
+        dist = filtered.groupby(['strategy', 'action']).size().unstack(fill_value=0)
+        st.dataframe(dist, use_container_width=True)
+
+        # 信号明细表
+        st.markdown("**信号明细 (最近200条)**")
+        display_cols = ['date', 'code', 'strategy', 'action', 'confidence',
+                        'composite_score', 'price_at_signal']
+        for rc in ['return_5d', 'return_10d', 'return_20d']:
+            if rc in filtered.columns:
+                display_cols.append(rc)
+
+        available_cols = [c for c in display_cols if c in filtered.columns]
+        st.dataframe(
+            filtered[available_cols].sort_values('date', ascending=False).head(200),
+            use_container_width=True, hide_index=True
+        )
+
+        # 待回填
+        pending = cache.get_pending_backfill_signals(market=market_code)
+        if not pending.empty:
+            st.warning(f"有 {len(pending)} 条信号待收益回填（需等待5/10/20交易日后自动回填）")
+
+    except Exception as e:
+        st.error(f"信号日志加载失败: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+
 
 def _render_portfolio_dashboard(market_code, start_date):
     """持仓总览: 添加持仓 + 仪表盘 + 行业分布 + 调仓计划"""
@@ -758,35 +906,107 @@ def _render_portfolio_dashboard(market_code, start_date):
 
     journal = get_journal()
 
+    market_label = "美股" if market_code == "US" else "A股"
+
     # 添加持仓
     with st.expander("➕ 添加/管理持仓", expanded=False):
         col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
         with col1:
-            h_code = st.text_input("股票代码", key="h_code", placeholder="如: 000001")
+            h_code = st.text_input("股票代码", key="h_code",
+                                   placeholder="如: AAPL" if market_code == "US" else "如: 000001")
         with col2:
             h_price = st.number_input("买入价格", min_value=0.01, value=10.0, key="h_price")
         with col3:
             h_shares = st.number_input("持仓数量", min_value=1, value=100, key="h_shares")
         with col4:
             if st.button("添加", key="add_holding"):
-                journal.add_holding(market_code, h_code, int(h_shares), h_price, name=h_code)
-                st.success(f"✅ 已添加 {h_code}")
-                st.rerun()
+                if not h_code or not h_code.strip():
+                    st.error("请输入股票代码")
+                else:
+                    h_code_clean = h_code.strip().upper() if market_code == "US" else h_code.strip()
+                    journal.add_holding(market_code, h_code_clean, int(h_shares), h_price, name=h_code_clean)
+                    st.success(f"✅ 已添加 {h_code_clean}（{market_label}）")
+                    st.rerun()
+
+        # 显示当前持仓列表（含删除功能）
+        existing_holdings = journal.get_holdings(market_code)
+        if not existing_holdings.empty:
+            st.markdown(f"**当前{market_label}持仓（{len(existing_holdings)}只）：**")
+            for idx, row in existing_holdings.iterrows():
+                hcol1, hcol2, hcol3, hcol4 = st.columns([2, 2, 2, 1])
+                hcol1.write(f"**{row['code']}** {row.get('name', '')}")
+                hcol2.write(f"成本: {row['average_cost']:.2f}")
+                hcol3.write(f"数量: {row['total_shares']}")
+                if hcol4.button("删除", key=f"del_{row['code']}_{idx}"):
+                    journal.remove_holding(market_code, row['code'])
+                    st.rerun()
 
     # 显示持仓
     holdings_df = journal.get_holdings(market_code)
 
     if holdings_df.empty:
-        st.info("📭 暂无持仓。请在上方添加您的持仓信息。")
-        st.markdown("**示例持仓（A股）：**")
-        demo_data = pd.DataFrame({
-            '代码': ['000001', '600519', '300750'],
-            '名称': ['平安银行', '贵州茅台', '宁德时代'],
-            '建议买入价': [11.50, 1550.0, 180.0],
-            '建议数量': [1000, 100, 500],
-        })
-        st.dataframe(demo_data, hide_index=True)
+        # 检查另一个市场是否有持仓
+        other_market = "CN" if market_code == "US" else "US"
+        other_label = "A股" if other_market == "CN" else "美股"
+        other_holdings = journal.get_holdings(other_market)
+
+        st.info(f"📭 当前{market_label}市场暂无持仓。请在上方添加您的持仓信息。")
+        if not other_holdings.empty:
+            st.warning(f"💡 您在 **{other_label}** 市场有 {len(other_holdings)} 只持仓。请在侧边栏切换市场查看。")
+        else:
+            placeholder_code = "000001" if market_code == "CN" else "AAPL"
+            st.markdown(f"**提示**：在上方输入股票代码（如 `{placeholder_code}`）、买入价格和数量后点击「添加」。")
         return
+
+    # 刷新持仓实时价格和行业信息
+    with st.spinner("正在获取最新行情..."):
+        try:
+            fetcher = get_fetcher_v4()
+            import sqlite3 as _sqlite3
+            for _, row in holdings_df.iterrows():
+                code = row['code']
+                if not code:
+                    continue
+                try:
+                    df = fetcher.get_daily_data(code, market=market_code)
+                    if df is not None and not df.empty:
+                        latest_price = float(df['close'].iloc[-1])
+                        journal.update_price(market_code, code, latest_price)
+                except Exception:
+                    pass
+                # 尝试填充行业信息（仅当sector为空时）
+                if not row.get('sector'):
+                    try:
+                        if market_code == "US":
+                            import yfinance as yf
+                            ticker = yf.Ticker(code)
+                            info = ticker.info
+                            sector = info.get('sector', '')
+                            if sector:
+                                with _sqlite3.connect(journal.db_path) as conn:
+                                    conn.execute(
+                                        "UPDATE holdings SET sector=? WHERE market=? AND code=?",
+                                        (sector, market_code, code)
+                                    )
+                                    conn.commit()
+                    except Exception:
+                        pass
+            # 重新加载更新后的持仓（含最新价格）
+            holdings_df = journal.get_holdings(market_code)
+            # 计算并更新权重
+            if not holdings_df.empty:
+                total_mv = holdings_df['market_value'].sum()
+                if total_mv > 0:
+                    with _sqlite3.connect(journal.db_path) as conn:
+                        for _, row in holdings_df.iterrows():
+                            w = row['market_value'] / total_mv
+                            conn.execute(
+                                "UPDATE holdings SET weight=? WHERE market=? AND code=?",
+                                (w, market_code, row['code'])
+                            )
+                        conn.commit()
+        except Exception as e:
+            logger.debug(f"刷新持仓价格失败: {e}")
 
     # 持仓仪表盘
     st.subheader("📊 持仓仪表盘")
@@ -872,18 +1092,27 @@ def _render_portfolio_dashboard(market_code, start_date):
                         buy_ops = [p for p in plan if p.get('action') == 'buy']
                         sell_ops = [p for p in plan if p.get('action') == 'sell']
 
+                        _cur = "$" if market_code == "US" else "¥"
                         if sell_ops:
                             st.markdown("**🔴 卖出操作:**")
-                            sell_data = [{"代码": p['code'], "股数": p['shares'],
-                                         "金额": f"{p['amount']:.0f}", "原因": p.get('reason', '')}
-                                        for p in sell_ops]
+                            sell_data = [{
+                                "代码": p['code'],
+                                "当前价格": f"{_cur}{p.get('price', 0):.2f}",
+                                "卖出股数": p['shares'],
+                                "卖出金额": f"{_cur}{p['amount']:,.0f}",
+                                "原因": p.get('reason', ''),
+                            } for p in sell_ops]
                             st.dataframe(pd.DataFrame(sell_data), hide_index=True)
 
                         if buy_ops:
                             st.markdown("**🟢 买入操作:**")
-                            buy_data = [{"代码": p['code'], "股数": p['shares'],
-                                        "金额": f"{p['amount']:.0f}", "原因": p.get('reason', '')}
-                                       for p in buy_ops]
+                            buy_data = [{
+                                "代码": p['code'],
+                                "当前价格": f"{_cur}{p.get('price', 0):.2f}",
+                                "买入股数": p['shares'],
+                                "买入金额": f"{_cur}{p['amount']:,.0f}",
+                                "原因": p.get('reason', ''),
+                            } for p in buy_ops]
                             st.dataframe(pd.DataFrame(buy_data), hide_index=True)
 
                         if not buy_ops and not sell_ops:
@@ -1428,13 +1657,19 @@ def render_etf_dip(market_code, start_date):
                             })
 
                 elif "VA" in dip_strategy:
-                    va = ETFValueAveraging(frequency=frequency, target_growth=invest_amount, market=market_code)
+                    va = ETFValueAveraging(target_growth_rate=0.01, base_amount=invest_amount)
+                    current_value = 0.0
                     for date_idx in df.index:
                         date_str = str(date_idx)
-                        signals = va.generate_signals(df.loc[:date_idx], date_str)
+                        current_price = df.loc[date_idx, 'close']
+                        current_value = total_shares * current_price
+                        signals = va.generate_signals(df.loc[:date_idx], date_str, current_value)
                         for sig in signals:
-                            total_invested += sig['amount']
-                            total_shares += sig['shares']
+                            if sig['action'] == 'buy':
+                                total_invested += sig['amount']
+                                total_shares += sig['shares']
+                            else:
+                                total_shares -= sig['shares']
                             invest_records.append({
                                 'date': date_idx,
                                 'price': sig['price'],
@@ -1631,7 +1866,9 @@ def render_goal_planning(market_code, start_date):
 def render_strategy_lab(market_code, start_date):
     st.header("⚡ 策略实验室")
 
-    opt_tab1, opt_tab2 = st.tabs(["ML算法对比", "策略集成"])
+    opt_tab1, opt_tab2, opt_tab3, opt_tab4, opt_tab5 = st.tabs([
+        "ML算法对比", "策略集成", "🔬 因子验证", "📊 策略冗余度分析", "🔄 数据驱动工作台"
+    ])
 
     # ML算法对比
     with opt_tab1:
@@ -1763,6 +2000,946 @@ def render_strategy_lab(market_code, start_date):
 
                 except Exception as e:
                     st.error(f"策略集成失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+    # 因子验证
+    with opt_tab3:
+        st.subheader("🔬 因子有效性验证")
+        st.markdown(
+            "对股票池中所有股票计算截面IC/IC_IR，评估每个因子的预测能力。\n\n"
+            "- **|IC_IR| > 0.5** = 强有效因子\n"
+            "- **|IC_IR| > 0.3** = 中等有效\n"
+            "- **|IC_IR| > 0.1** = 弱有效\n"
+            "- **|IC_IR| ≤ 0.1** = 无效（可考虑剔除）"
+        )
+
+        fv_pool_size = st.selectbox(
+            "股票池", ["默认精选池(30只)", "S&P 500训练池(美股)"],
+            key="fv_pool"
+        )
+
+        if st.button("运行因子验证", type="primary", key="fv_run"):
+            with st.spinner("正在计算因子IC（可能需要几分钟）..."):
+                try:
+                    from src.factors.factor_validator import FactorValidator
+                    from src.data.market import get_stock_pool
+
+                    if "S&P 500" in fv_pool_size:
+                        pool = get_stock_pool("US", size="sp500")[:50]  # 取前50只加速
+                        fv_market = "US"
+                    else:
+                        pool = get_stock_pool(market_code)
+                        fv_market = market_code
+
+                    data_dict = {}
+                    progress = st.progress(0)
+                    for i, sym in enumerate(pool):
+                        try:
+                            d = fetch_stock_data(sym, start_date, fv_market)
+                            if not d.empty and len(d) >= 60:
+                                data_dict[sym] = d
+                        except Exception:
+                            pass
+                        progress.progress((i + 1) / len(pool))
+
+                    if len(data_dict) < 10:
+                        st.warning(f"有效数据不足（仅{len(data_dict)}只），请检查数据源")
+                    else:
+                        validator = FactorValidator()
+                        report = validator.validate(data_dict, min_stocks=min(20, max(5, len(data_dict) // 2)))
+
+                        for fwd in [5, 10, 20]:
+                            summary = validator.generate_summary(report, forward_days=fwd)
+                            if not summary.empty:
+                                st.markdown(f"**预测周期: {fwd}日**")
+                                st.dataframe(summary, use_container_width=True, hide_index=True)
+
+                        if report.correlation_matrix is not None and not report.correlation_matrix.empty:
+                            st.markdown("**因子间相关性矩阵**")
+                            fig = px.imshow(
+                                report.correlation_matrix,
+                                text_auto=True, aspect="auto",
+                                color_continuous_scale="RdBu_r",
+                                zmin=-1, zmax=1,
+                            )
+                            fig.update_layout(height=500)
+                            st.plotly_chart(fig, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"因子验证失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+    # 策略冗余度分析
+    with opt_tab4:
+        st.subheader("📊 策略冗余度分析")
+        st.markdown(
+            "分析6个策略之间的信号相关性和收益相关性，识别冗余与互补关系。\n\n"
+            "- **信号相关>0.8** → 两个策略冗余，建议合并\n"
+            "- **增量夏普≤0** → 该策略对集成无贡献，可移除"
+        )
+
+        if st.button("运行冗余度分析", type="primary", key="rd_run"):
+            with st.spinner("正在分析策略冗余度..."):
+                try:
+                    from src.optimization.strategy_redundancy import StrategyRedundancyAnalyzer
+                    from src.data.market import get_stock_pool
+
+                    pool = get_stock_pool(market_code)[:20]
+                    data_dict = {}
+                    progress = st.progress(0)
+                    for i, sym in enumerate(pool):
+                        try:
+                            d = fetch_stock_data(sym, start_date, market_code)
+                            if not d.empty and len(d) >= 120:
+                                data_dict[sym] = d
+                        except Exception:
+                            pass
+                        progress.progress((i + 1) / len(pool))
+
+                    if len(data_dict) < 5:
+                        st.warning("有效数据不足")
+                    else:
+                        analyzer = StrategyRedundancyAnalyzer()
+                        rd_report = analyzer.analyze(data_dict)
+
+                        if rd_report.signal_correlation is not None and not rd_report.signal_correlation.empty:
+                            st.markdown("**信号相关性矩阵**")
+                            fig = px.imshow(
+                                rd_report.signal_correlation,
+                                text_auto=True, aspect="auto",
+                                color_continuous_scale="RdBu_r",
+                                zmin=-1, zmax=1,
+                            )
+                            fig.update_layout(height=400)
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        if rd_report.incremental_value:
+                            st.markdown("**增量贡献 (Δ夏普)**")
+                            inc_df = pd.DataFrame([
+                                {"策略": STRATEGY_NAMES.get(k, k), "增量夏普": v,
+                                 "评价": "有效" if v > 0.05 else ("边际" if v > 0 else "冗余")}
+                                for k, v in sorted(rd_report.incremental_value.items(),
+                                                    key=lambda x: x[1], reverse=True)
+                            ])
+                            st.dataframe(inc_df, use_container_width=True, hide_index=True)
+
+                        if rd_report.redundant_pairs:
+                            st.warning(
+                                f"发现 {len(rd_report.redundant_pairs)} 对冗余策略: " +
+                                ", ".join(f"{STRATEGY_NAMES.get(k1,k1)}↔{STRATEGY_NAMES.get(k2,k2)}({c:.2f})"
+                                          for k1, k2, c in rd_report.redundant_pairs)
+                            )
+
+                        if rd_report.recommended_removals:
+                            st.error(f"建议移除: {', '.join(STRATEGY_NAMES.get(s, s) for s in rd_report.recommended_removals)}")
+                        else:
+                            st.success("所有策略均有独立贡献，无冗余")
+
+                except Exception as e:
+                    st.error(f"冗余度分析失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+    # 数据驱动工作台
+    with opt_tab5:
+        _render_data_driven_workbench(market_code, start_date)
+
+
+def _render_data_driven_workbench(market_code: str, start_date: str):
+    """数据驱动工作台 — 5个步骤组成的可视化流水线"""
+    st.subheader("🔄 数据驱动工作台")
+    st.markdown(
+        "完整的数据驱动闭环：**批量下载** → **因子验证** → **权重优化** → "
+        "**阈值搜索** → **配置管理与再训练**"
+    )
+
+    # ===== Step 1: 批量下载训练数据 =====
+    with st.expander("📥 Step 1: 批量下载训练数据", expanded=False):
+        st.markdown("下载股票池的历史数据，构建训练数据集。")
+
+        # --- 已有数据历史 ---
+        import sqlite3
+        from src.data.data_cache import DataCache
+        try:
+            _cache = DataCache()
+            with sqlite3.connect(_cache.db_path) as _conn:
+                _dl_history = pd.read_sql_query("""
+                    SELECT market as 市场,
+                           COUNT(DISTINCT code) as 股票数,
+                           SUM(cnt) as 总行数,
+                           MIN(earliest) as 最早日期,
+                           MAX(latest) as 最新日期,
+                           MAX(last_upd) as 最后更新
+                    FROM (
+                        SELECT d.market, d.code, COUNT(*) as cnt,
+                               MIN(d.date) as earliest, MAX(d.date) as latest,
+                               m.last_update as last_upd
+                        FROM daily_ohlcv d
+                        LEFT JOIN cache_meta m ON d.market = m.market AND d.code = m.code
+                        GROUP BY d.market, d.code
+                    ) GROUP BY market
+                """, _conn)
+
+            if not _dl_history.empty:
+                st.markdown("**已缓存数据概览**")
+                st.dataframe(_dl_history, use_container_width=True, hide_index=True)
+
+                # 详细列表（可折叠）
+                with st.expander("查看各股票详情", expanded=False):
+                    _detail = pd.read_sql_query("""
+                        SELECT d.market as 市场, d.code as 代码, COUNT(*) as 数据行数,
+                               MIN(d.date) as 起始, MAX(d.date) as 截止,
+                               m.last_update as 最后更新
+                        FROM daily_ohlcv d
+                        LEFT JOIN cache_meta m ON d.market = m.market AND d.code = m.code
+                        GROUP BY d.market, d.code
+                        ORDER BY d.market, d.code
+                    """, sqlite3.connect(_cache.db_path))
+                    st.dataframe(_detail, use_container_width=True, hide_index=True,
+                                 height=300)
+            else:
+                st.info("暂无缓存数据，请先下载。")
+        except Exception:
+            pass
+
+        st.markdown("---")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            dl_market = st.selectbox("市场", ["US", "CN"], index=0 if market_code == "US" else 1,
+                                     key="wb_dl_market")
+        with col2:
+            # 股票池选项根据市场动态变化
+            if dl_market == "US":
+                _pool_options = ["S&P 500(前100只)", "S&P 500(全量~500只)", "默认精选池(30只)"]
+            else:
+                _pool_options = ["A股精选池(40只)", "默认精选池(30只)"]
+            dl_pool = st.selectbox("股票池", _pool_options, key="wb_dl_pool")
+        with col3:
+            dl_years = st.slider("历史年数", 3, 15, 10, key="wb_dl_years")
+
+        # 预估数据量 & 已有数据检测
+        pool_size_map = {
+            "S&P 500(前100只)": 100, "S&P 500(全量~500只)": 500,
+            "默认精选池(30只)": 30, "A股精选池(40只)": 40,
+        }
+        est_stocks = pool_size_map.get(dl_pool, 30)
+        est_rows = est_stocks * dl_years * 252
+
+        # 检查已缓存的数量，提示是否需要重新下载
+        try:
+            with sqlite3.connect(_cache.db_path) as _conn:
+                _cached_count = _conn.execute(
+                    "SELECT COUNT(DISTINCT code) FROM daily_ohlcv WHERE market=?",
+                    [dl_market]
+                ).fetchone()[0]
+                _cached_rows = _conn.execute(
+                    "SELECT COUNT(*) FROM daily_ohlcv WHERE market=?",
+                    [dl_market]
+                ).fetchone()[0]
+        except Exception:
+            _cached_count = 0
+            _cached_rows = 0
+
+        if _cached_count > 0 and _cached_count >= est_stocks * 0.8:
+            st.success(
+                f"已有缓存: {dl_market}市场 {_cached_count}只股票 / {_cached_rows:,}行。"
+                f"再次下载将自动增量更新（仅补充缺失数据），不会重复下载。"
+            )
+        elif _cached_count > 0:
+            st.info(
+                f"已有缓存: {dl_market}市场 {_cached_count}只/{_cached_rows:,}行，"
+                f"目标 ~{est_stocks}只。点击下载将增量补充剩余数据。"
+            )
+        else:
+            st.info(f"预估: ~{est_stocks}只股票 × {dl_years}年 ≈ {est_rows:,}行日线数据")
+
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            do_download = st.button("开始下载", type="primary", key="wb_dl_run")
+        with col_btn2:
+            load_cached = st.button("直接加载已有缓存", key="wb_dl_load",
+                                     disabled=(_cached_count == 0))
+
+        if do_download:
+            with st.spinner("批量下载中..."):
+                try:
+                    from src.data.market import get_stock_pool
+
+                    if "S&P 500(全量" in dl_pool:
+                        pool = get_stock_pool("US", size="sp500")
+                    elif "S&P 500(前100" in dl_pool:
+                        pool = get_stock_pool("US", size="sp500")[:100]
+                    elif "A股精选池" in dl_pool:
+                        pool = get_stock_pool("CN")
+                    else:
+                        pool = get_stock_pool(dl_market)
+
+                    fetcher = DataFetcher()
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    stats = {"success": 0, "failed": 0, "skipped": 0}
+
+                    def on_progress(current, total, code, status):
+                        progress_bar.progress(current / total)
+                        stats[status] = stats.get(status, 0) + 1
+                        status_text.text(
+                            f"[{current}/{total}] {code} - {status} | "
+                            f"成功:{stats['success']} 失败:{stats['failed']} 跳过:{stats['skipped']}"
+                        )
+
+                    results = fetcher.batch_download(
+                        stock_list=pool, years=dl_years,
+                        market=dl_market, include_financial=True,
+                        progress_callback=on_progress
+                    )
+
+                    # 提取data_dict和financial_dict
+                    data_dict = {}
+                    financial_dict = {}
+                    for code, info in results.items():
+                        if info.get("status") == "success" and "daily" in info:
+                            d = info["daily"]
+                            if not d.empty and len(d) >= 60:
+                                data_dict[code] = d
+                            if "financial" in info and info["financial"]:
+                                financial_dict[code] = info["financial"]
+
+                    st.session_state['training_data'] = data_dict
+                    st.session_state['training_financial'] = financial_dict
+
+                    st.success(
+                        f"下载完成! 有效数据: {len(data_dict)}只股票, "
+                        f"财务数据: {len(financial_dict)}只"
+                    )
+
+                    total_rows = sum(len(d) for d in data_dict.values())
+                    st.metric("总数据行数", f"{total_rows:,}")
+
+                except Exception as e:
+                    st.error(f"批量下载失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        if load_cached:
+            with st.spinner("加载缓存数据中..."):
+                try:
+                    with sqlite3.connect(_cache.db_path) as _conn:
+                        _codes = [r[0] for r in _conn.execute(
+                            "SELECT DISTINCT code FROM daily_ohlcv WHERE market=?",
+                            [dl_market]
+                        ).fetchall()]
+
+                    data_dict = {}
+                    for _code in _codes:
+                        try:
+                            d = fetch_stock_data(_code, start_date, dl_market)
+                            if not d.empty and len(d) >= 60:
+                                data_dict[_code] = d
+                        except Exception:
+                            pass
+
+                    st.session_state['training_data'] = data_dict
+                    total_rows = sum(len(d) for d in data_dict.values())
+                    st.success(f"已从缓存加载 {len(data_dict)} 只股票, {total_rows:,} 行数据")
+                except Exception as e:
+                    st.error(f"加载缓存失败: {e}")
+
+        if 'training_data' in st.session_state:
+            n = len(st.session_state['training_data'])
+            st.success(f"已有训练数据: {n}只股票 (可直接进入Step 2)")
+
+    # ===== Step 2: 因子有效性验证 =====
+    with st.expander("🔬 Step 2: 因子有效性验证", expanded=False):
+        st.markdown("计算截面IC/IC_IR，评估各因子的预测能力。")
+
+        # --- 历史记录 ---
+        try:
+            _fv_history = _cache.load_training_history(step="factor_validation", limit=5)
+            if not _fv_history.empty:
+                st.markdown("**历史验证记录**")
+                _fv_display = _fv_history[['created_at', 'market', 'stock_count', 'method', 'result_summary']].copy()
+                _fv_display.columns = ['时间', '市场', '股票数', '方法', '结果摘要']
+                st.dataframe(_fv_display, use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+
+        st.markdown("---")
+        use_training = st.checkbox(
+            "使用Step 1下载的训练数据", value='training_data' in st.session_state,
+            key="wb_fv_use_training"
+        )
+
+        if st.button("运行因子验证", type="primary", key="wb_fv_run"):
+            with st.spinner("正在计算因子IC（可能需要几分钟）..."):
+                try:
+                    from src.factors.factor_validator import FactorValidator
+
+                    if use_training and 'training_data' in st.session_state:
+                        data_dict = st.session_state['training_data']
+                    else:
+                        from src.data.market import get_stock_pool
+                        pool = get_stock_pool(market_code)
+                        data_dict = {}
+                        progress = st.progress(0)
+                        for i, sym in enumerate(pool):
+                            try:
+                                d = fetch_stock_data(sym, start_date, market_code)
+                                if not d.empty and len(d) >= 60:
+                                    data_dict[sym] = d
+                            except Exception:
+                                pass
+                            progress.progress((i + 1) / len(pool))
+
+                    if len(data_dict) < 10:
+                        st.warning(f"有效数据不足（仅{len(data_dict)}只）")
+                    else:
+                        validator = FactorValidator()
+                        report = validator.validate(data_dict, min_stocks=min(20, max(5, len(data_dict) // 2)))
+
+                        st.session_state['factor_results'] = report
+
+                        # 生成摘要用于历史记录
+                        _fv_summaries = []
+                        for fwd in [5, 10, 20]:
+                            summary = validator.generate_summary(report, forward_days=fwd)
+                            if not summary.empty:
+                                st.markdown(f"**预测周期: {fwd}日**")
+                                st.dataframe(summary, use_container_width=True, hide_index=True)
+                                # 取top3强有效因子名
+                                strong = summary[summary['有效性'].isin(['强有效', '中等有效'])].head(3)
+                                if not strong.empty:
+                                    _fv_summaries.append(f"{fwd}日Top: {', '.join(strong['因子'].tolist())}")
+
+                        if report.correlation_matrix is not None and not report.correlation_matrix.empty:
+                            st.markdown("**因子间相关性矩阵**")
+                            fig = px.imshow(
+                                report.correlation_matrix,
+                                text_auto=True, aspect="auto",
+                                color_continuous_scale="RdBu_r",
+                                zmin=-1, zmax=1,
+                            )
+                            fig.update_layout(height=500)
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        # 保存历史记录
+                        _result_summary = f"因子数:{len(report.factor_results)}"
+                        if _fv_summaries:
+                            _result_summary += " | " + "; ".join(_fv_summaries)
+                        try:
+                            _cache.save_training_history(
+                                step="factor_validation",
+                                market=market_code,
+                                method="IC/IC_IR",
+                                stock_count=len(data_dict),
+                                result_summary=_result_summary,
+                            )
+                        except Exception:
+                            pass
+
+                        st.success("因子验证完成，结果已保存")
+
+                except Exception as e:
+                    st.error(f"因子验证失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        if 'factor_results' in st.session_state:
+            st.success("已有因子验证结果 (可直接进入Step 3)")
+
+    # ===== Step 3: 权重优化 =====
+    with st.expander("⚖️ Step 3: 权重优化", expanded=False):
+        st.markdown("基于因子验证结果，优化策略内因子权重。")
+
+        # --- 历史记录 ---
+        try:
+            _wo_history = _cache.load_training_history(step="weight_optimization", limit=10)
+            if not _wo_history.empty:
+                st.markdown("**历史优化记录**")
+                _wo_display = _wo_history[['created_at', 'market', 'strategy', 'method', 'stock_count', 'result_summary']].copy()
+                _wo_display.columns = ['时间', '市场', '策略', '方法', '股票数', '结果摘要']
+                st.dataframe(_wo_display, use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            wo_strategy = st.selectbox(
+                "选择策略", list(STRATEGY_NAMES.keys()),
+                format_func=lambda x: STRATEGY_NAMES[x],
+                key="wb_wo_strategy"
+            )
+        with col2:
+            wo_method = st.selectbox(
+                "优化方法", ["IC_IR加权", "随机搜索最大化夏普"],
+                key="wb_wo_method"
+            )
+
+        if st.button("优化权重", type="primary", key="wb_wo_run"):
+            with st.spinner("正在优化权重..."):
+                try:
+                    from src.optimization.weight_optimizer import WeightOptimizer, OptimizationResult
+
+                    optimizer = WeightOptimizer()
+                    strategy = get_strategy(wo_strategy)
+
+                    factor_names = list(strategy.params.get('optimized_weights', {}).keys())
+                    if not factor_names:
+                        factor_names = [
+                            'rsi_14', 'momentum_5', 'momentum_20', 'ma_cross',
+                            'volatility_20', 'adx', 'volume_ratio', 'price_position'
+                        ]
+
+                    weights = None
+                    _wo_method_name = wo_method
+
+                    if wo_method == "IC_IR加权":
+                        if 'factor_results' not in st.session_state:
+                            st.warning("请先运行Step 2因子验证")
+                        else:
+                            factor_report = st.session_state['factor_results']
+                            weights = optimizer.optimize_icir(
+                                factor_report.factor_results, factor_names
+                            )
+                            opt_result = OptimizationResult(
+                                strategy_name=wo_strategy, method="ic_ir", weights=weights,
+                            )
+                            st.session_state['opt_result'] = {wo_strategy: opt_result}
+
+                            st.markdown("**优化后权重**")
+                            w_df = pd.DataFrame([
+                                {"因子": k, "优化权重": f"{v:.4f}"}
+                                for k, v in sorted(weights.items(), key=lambda x: x[1], reverse=True)
+                            ])
+                            st.dataframe(w_df, use_container_width=True, hide_index=True)
+
+                    else:  # 随机搜索夏普
+                        if 'training_data' not in st.session_state:
+                            st.warning("请先运行Step 1下载训练数据")
+                        else:
+                            data_dict = st.session_state['training_data']
+                            weights = optimizer.optimize_sharpe(
+                                data_dict, strategy, factor_names, n_trials=200
+                            )
+                            opt_result = OptimizationResult(
+                                strategy_name=wo_strategy, method="sharpe", weights=weights,
+                            )
+                            st.session_state['opt_result'] = {wo_strategy: opt_result}
+
+                            st.markdown("**优化后权重（夏普最大化）**")
+                            w_df = pd.DataFrame([
+                                {"因子": k, "优化权重": f"{v:.4f}"}
+                                for k, v in sorted(weights.items(), key=lambda x: x[1], reverse=True)
+                            ])
+                            st.dataframe(w_df, use_container_width=True, hide_index=True)
+
+                    # 保存历史记录
+                    if weights:
+                        _top3 = sorted(weights.items(), key=lambda x: x[1], reverse=True)[:3]
+                        _wo_summary = "Top权重: " + ", ".join(f"{k}={v:.3f}" for k, v in _top3)
+                        _data_count = len(st.session_state.get('training_data', {}))
+                        try:
+                            _cache.save_training_history(
+                                step="weight_optimization",
+                                market=market_code,
+                                strategy=STRATEGY_NAMES.get(wo_strategy, wo_strategy),
+                                method=_wo_method_name,
+                                stock_count=_data_count,
+                                result_summary=_wo_summary,
+                            )
+                        except Exception:
+                            pass
+
+                    # Walk-Forward验证
+                    if 'opt_result' in st.session_state and 'factor_results' in st.session_state and 'training_data' in st.session_state:
+                        st.markdown("**Walk-Forward稳定性验证**")
+                        try:
+                            wf_results = optimizer.walk_forward_validate(
+                                st.session_state['training_data'],
+                                st.session_state['factor_results'].factor_results,
+                                factor_names,
+                            )
+                            if wf_results:
+                                wf_df = pd.DataFrame(wf_results)
+                                st.dataframe(wf_df, use_container_width=True, hide_index=True)
+                        except Exception as wf_e:
+                            st.info(f"Walk-Forward验证跳过: {wf_e}")
+
+                except Exception as e:
+                    st.error(f"权重优化失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        # 保存配置按钮
+        if 'opt_result' in st.session_state:
+            st.success("已有优化结果")
+            if st.button("💾 保存到配置文件", key="wb_wo_save"):
+                try:
+                    from src.optimization.weight_optimizer import WeightOptimizer
+                    optimizer = WeightOptimizer()
+                    optimizer.save_config(st.session_state['opt_result'])
+                    st.success("已保存到 config/strategy_weights.json")
+                except Exception as e:
+                    st.error(f"保存失败: {e}")
+
+    # ===== Step 4: 阈值网格搜索 =====
+    with st.expander("🎯 Step 4: 阈值网格搜索", expanded=False):
+        st.markdown("遍历(买入阈值, 卖出阈值)组合，找到夏普最优点。")
+
+        # --- 历史记录 ---
+        try:
+            _gs_history = _cache.load_training_history(step="grid_search", limit=10)
+            if not _gs_history.empty:
+                st.markdown("**历史搜索记录**")
+                _gs_display = _gs_history[['created_at', 'market', 'strategy', 'stock_count', 'result_summary']].copy()
+                _gs_display.columns = ['时间', '市场', '策略', '股票数', '最优结果']
+                st.dataframe(_gs_display, use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            gs_strategy = st.selectbox(
+                "选择策略", list(STRATEGY_NAMES.keys()),
+                format_func=lambda x: STRATEGY_NAMES[x],
+                key="wb_gs_strategy"
+            )
+        with col2:
+            gs_step = st.selectbox("搜索步长", [5.0, 2.5, 10.0], key="wb_gs_step")
+
+        col3, col4 = st.columns(2)
+        with col3:
+            gs_buy_lo = st.number_input("买入阈值下限", 40, 90, 50, key="wb_gs_buy_lo")
+            gs_buy_hi = st.number_input("买入阈值上限", 50, 95, 80, key="wb_gs_buy_hi")
+        with col4:
+            gs_sell_lo = st.number_input("卖出阈值下限", 10, 50, 20, key="wb_gs_sell_lo")
+            gs_sell_hi = st.number_input("卖出阈值上限", 20, 60, 50, key="wb_gs_sell_hi")
+
+        if st.button("开始网格搜索", type="primary", key="wb_gs_run"):
+            with st.spinner("网格搜索中（可能需要几分钟）..."):
+                try:
+                    from src.backtest.rule_backtester import RuleBacktester
+
+                    if 'training_data' not in st.session_state:
+                        st.warning("请先运行Step 1下载训练数据")
+                    else:
+                        data_dict = st.session_state['training_data']
+                        strategy = get_strategy(gs_strategy)
+                        backtester = RuleBacktester()
+
+                        results = backtester.grid_search_thresholds(
+                            data_dict, strategy,
+                            buy_range=(gs_buy_lo, gs_buy_hi),
+                            sell_range=(gs_sell_lo, gs_sell_hi),
+                            step=gs_step,
+                        )
+
+                        if results:
+                            # 热力图
+                            heatmap_df = backtester.generate_heatmap_data(results)
+                            if not heatmap_df.empty:
+                                st.markdown("**夏普比率热力图 (买入阈值 × 卖出阈值)**")
+                                fig = px.imshow(
+                                    heatmap_df,
+                                    text_auto=".2f", aspect="auto",
+                                    color_continuous_scale="RdYlGn",
+                                    labels=dict(x="卖出阈值", y="买入阈值", color="夏普"),
+                                )
+                                fig.update_layout(height=500)
+                                st.plotly_chart(fig, use_container_width=True)
+
+                            # 结果排名表
+                            st.markdown("**Top 10 参数组合**")
+                            sorted_results = sorted(results, key=lambda r: r.sharpe, reverse=True)[:10]
+                            res_df = pd.DataFrame([
+                                {
+                                    "买入阈值": r.buy_threshold,
+                                    "卖出阈值": r.sell_threshold,
+                                    "夏普": f"{r.sharpe:.3f}",
+                                    "年化收益": f"{r.annual_return:.2%}",
+                                    "最大回撤": f"{r.max_drawdown:.2%}",
+                                    "胜率": f"{r.win_rate:.1%}",
+                                    "交易次数": r.trade_count,
+                                }
+                                for r in sorted_results
+                            ])
+                            st.dataframe(res_df, use_container_width=True, hide_index=True)
+
+                            # 保存最优
+                            best = sorted_results[0]
+                            st.session_state['best_thresholds'] = {
+                                'strategy': gs_strategy,
+                                'buy_threshold': best.buy_threshold,
+                                'sell_threshold': best.sell_threshold,
+                                'sharpe': best.sharpe,
+                            }
+                            st.success(
+                                f"最优: 买入>{best.buy_threshold} 卖出<{best.sell_threshold} "
+                                f"夏普={best.sharpe:.3f}"
+                            )
+
+                            # 保存历史记录
+                            try:
+                                _cache.save_training_history(
+                                    step="grid_search",
+                                    market=market_code,
+                                    strategy=STRATEGY_NAMES.get(gs_strategy, gs_strategy),
+                                    method=f"step={gs_step}",
+                                    stock_count=len(data_dict),
+                                    result_summary=f"买入>{best.buy_threshold} 卖出<{best.sell_threshold} 夏普={best.sharpe:.3f} 胜率={best.win_rate:.1%}",
+                                    params={"buy_range": [gs_buy_lo, gs_buy_hi],
+                                            "sell_range": [gs_sell_lo, gs_sell_hi],
+                                            "step": gs_step},
+                                )
+                            except Exception:
+                                pass
+
+                            # 自适应评分区间
+                            st.markdown("---")
+                            st.markdown("**自适应评分区间 (P10-P90)**")
+                            try:
+                                factor_names = [
+                                    'rsi_14', 'momentum_5', 'momentum_20', 'ma_cross',
+                                    'volatility_20', 'adx', 'volume_ratio', 'price_position'
+                                ]
+                                ranges = backtester.compute_pooled_score_range(
+                                    data_dict, factor_names
+                                )
+                                if ranges:
+                                    range_df = pd.DataFrame([
+                                        {"因子": k, "P10(低)": f"{v[0]:.4f}", "P90(高)": f"{v[1]:.4f}"}
+                                        for k, v in ranges.items()
+                                    ])
+                                    st.dataframe(range_df, use_container_width=True, hide_index=True)
+                            except Exception as sr_e:
+                                st.info(f"评分区间计算跳过: {sr_e}")
+
+                        else:
+                            st.warning("网格搜索未返回有效结果")
+
+                except Exception as e:
+                    st.error(f"网格搜索失败: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        # 应用最优阈值按钮
+        if 'best_thresholds' in st.session_state:
+            bt = st.session_state['best_thresholds']
+            st.info(f"当前最优阈值: {STRATEGY_NAMES[bt['strategy']]} 买入>{bt['buy_threshold']} 卖出<{bt['sell_threshold']}")
+            if st.button("📝 应用最优阈值到配置", key="wb_gs_apply"):
+                try:
+                    import json
+                    from pathlib import Path
+                    config_path = Path("config/strategy_weights.json")
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    config = {}
+                    if config_path.exists():
+                        with open(config_path) as f:
+                            config = json.load(f)
+                    sk = bt['strategy']
+                    if sk not in config:
+                        config[sk] = {}
+                    config[sk]['buy_threshold'] = bt['buy_threshold']
+                    config[sk]['sell_threshold'] = bt['sell_threshold']
+                    config[sk]['threshold_source'] = 'grid_search'
+                    with open(config_path, 'w') as f:
+                        json.dump(config, f, indent=2, ensure_ascii=False)
+                    st.success(f"已更新 {config_path}")
+                except Exception as e:
+                    st.error(f"保存失败: {e}")
+
+    # ===== Step 5: 配置状态与再训练 =====
+    with st.expander("📋 Step 5: 配置状态与再训练", expanded=False):
+        st.markdown("查看当前配置文件状态、信号日志统计，支持一键再训练。")
+
+        # --- 全流程训练历史汇总 ---
+        try:
+            _all_history = _cache.load_training_history(limit=30)
+            if not _all_history.empty:
+                st.markdown("**全流程训练历史**")
+                _ah_display = _all_history[['created_at', 'step', 'market', 'strategy', 'method', 'stock_count', 'result_summary']].copy()
+                _ah_display.columns = ['时间', '步骤', '市场', '策略', '方法', '股票数', '结果摘要']
+                # 步骤名映射
+                _step_map = {
+                    'factor_validation': '🔬 因子验证',
+                    'weight_optimization': '⚖️ 权重优化',
+                    'grid_search': '🎯 阈值搜索',
+                    'retrain': '🔄 再训练',
+                }
+                _ah_display['步骤'] = _ah_display['步骤'].map(lambda x: _step_map.get(x, x))
+                st.dataframe(_ah_display, use_container_width=True, hide_index=True, height=250)
+        except Exception:
+            pass
+
+        st.markdown("---")
+
+        # 当前配置文件
+        import json
+        from pathlib import Path
+        config_path = Path("config/strategy_weights.json")
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+            st.markdown("**当前 `config/strategy_weights.json`**")
+            st.json(config)
+
+            # 各策略参数来源
+            st.markdown("**各策略参数来源**")
+            source_rows = []
+            for key in STRATEGY_NAMES:
+                if key in config:
+                    src = config[key].get('threshold_source', config[key].get('method', '优化配置'))
+                    source_rows.append({"策略": STRATEGY_NAMES[key], "参数来源": f"优化配置 ({src})"})
+                else:
+                    source_rows.append({"策略": STRATEGY_NAMES[key], "参数来源": "默认硬编码"})
+            st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("尚无优化配置文件 (config/strategy_weights.json)，使用默认硬编码参数")
+
+        # 信号日志统计
+        st.markdown("---")
+        st.markdown("**信号日志统计**")
+        try:
+            from src.data.data_cache import DataCache
+            cache = DataCache()
+            signals = cache.load_signals(market=market_code, limit=5000)
+            if signals.empty:
+                st.info("暂无信号记录。在「个股分析」中分析股票后会自动记录信号。")
+            else:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("总信号数", len(signals))
+                with col2:
+                    recent = signals[signals['date'] >= (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')]
+                    st.metric("近30天信号", len(recent))
+                with col3:
+                    # 胜率：return_5d > 0 的比例
+                    if 'return_5d' in signals.columns:
+                        filled = signals[signals['return_5d'].notna()]
+                        if len(filled) > 0:
+                            win_rate = (filled['return_5d'] > 0).mean()
+                            st.metric("5日胜率", f"{win_rate:.1%}")
+                        else:
+                            st.metric("5日胜率", "待回填")
+                    else:
+                        st.metric("5日胜率", "-")
+
+                # 各策略信号分布
+                st.markdown("**各策略信号分布**")
+                dist = signals.groupby(['strategy', 'action']).size().unstack(fill_value=0)
+                st.dataframe(dist, use_container_width=True)
+
+                # 待回填信号
+                pending = cache.get_pending_backfill_signals(market=market_code)
+                if not pending.empty:
+                    st.warning(f"有 {len(pending)} 条信号待收益回填")
+
+        except Exception as e:
+            st.warning(f"信号日志读取失败: {e}")
+
+        # 一键再训练
+        st.markdown("---")
+        if st.button("🔄 一键再训练 (Step 2→3→4 自动执行)", type="primary", key="wb_retrain"):
+            if 'training_data' not in st.session_state:
+                st.warning("请先运行Step 1下载训练数据")
+            else:
+                data_dict = st.session_state['training_data']
+                retrain_strategy = st.session_state.get('wb_wo_strategy', 'balanced')
+                progress_text = st.empty()
+                retrain_progress = st.progress(0)
+
+                try:
+                    # Step 2: 因子验证
+                    progress_text.text("Step 2/3: 因子验证中...")
+                    retrain_progress.progress(0.1)
+                    from src.factors.factor_validator import FactorValidator
+                    validator = FactorValidator()
+                    factor_report = validator.validate(data_dict, min_stocks=min(20, max(5, len(data_dict) // 2)))
+                    st.session_state['factor_results'] = factor_report
+                    retrain_progress.progress(0.33)
+
+                    # Step 3: 权重优化
+                    progress_text.text("Step 3/3: 权重优化中...")
+                    from src.optimization.weight_optimizer import WeightOptimizer, OptimizationResult
+                    optimizer = WeightOptimizer()
+                    strategy = get_strategy(retrain_strategy)
+                    factor_names = list(strategy.params.get('optimized_weights', {}).keys())
+                    if not factor_names:
+                        factor_names = [
+                            'rsi_14', 'momentum_5', 'momentum_20', 'ma_cross',
+                            'volatility_20', 'adx', 'volume_ratio', 'price_position'
+                        ]
+
+                    weights = optimizer.optimize_icir(
+                        factor_report.factor_results, factor_names
+                    )
+                    opt_result = OptimizationResult(
+                        strategy_name=retrain_strategy,
+                        method="ic_ir",
+                        weights=weights,
+                    )
+                    st.session_state['opt_result'] = {retrain_strategy: opt_result}
+                    retrain_progress.progress(0.66)
+
+                    # Step 4: 阈值网格搜索
+                    progress_text.text("Step 4/4: 阈值网格搜索中...")
+                    from src.backtest.rule_backtester import RuleBacktester
+                    backtester = RuleBacktester()
+                    gs_results = backtester.grid_search_thresholds(
+                        data_dict, strategy,
+                        buy_range=(50, 80), sell_range=(20, 50), step=5.0,
+                    )
+                    retrain_progress.progress(0.9)
+
+                    # 保存配置
+                    optimizer.save_config({retrain_strategy: opt_result})
+                    if gs_results:
+                        best = max(gs_results, key=lambda r: r.sharpe)
+                        import json
+                        cp = Path("config/strategy_weights.json")
+                        config = {}
+                        if cp.exists():
+                            with open(cp) as f:
+                                config = json.load(f)
+                        if retrain_strategy not in config:
+                            config[retrain_strategy] = {}
+                        config[retrain_strategy]['buy_threshold'] = best.buy_threshold
+                        config[retrain_strategy]['sell_threshold'] = best.sell_threshold
+                        config[retrain_strategy]['threshold_source'] = 'grid_search_retrain'
+                        with open(cp, 'w') as f:
+                            json.dump(config, f, indent=2, ensure_ascii=False)
+
+                    retrain_progress.progress(1.0)
+                    progress_text.text("再训练完成!")
+
+                    # 保存再训练历史
+                    _retrain_summary = f"策略={STRATEGY_NAMES[retrain_strategy]}, 权重+阈值已更新"
+                    if gs_results:
+                        _best_gs = max(gs_results, key=lambda r: r.sharpe)
+                        _retrain_summary += f", 最优夏普={_best_gs.sharpe:.3f}"
+                    try:
+                        _cache.save_training_history(
+                            step="retrain",
+                            market=market_code,
+                            strategy=STRATEGY_NAMES.get(retrain_strategy, retrain_strategy),
+                            method="auto(IC_IR+grid_search)",
+                            stock_count=len(data_dict),
+                            result_summary=_retrain_summary,
+                        )
+                    except Exception:
+                        pass
+
+                    st.success(
+                        f"再训练完成! 策略 {STRATEGY_NAMES[retrain_strategy]} 的权重和阈值已更新到配置文件。"
+                    )
+                    st.balloons()
+
+                except Exception as e:
+                    st.error(f"再训练失败: {e}")
                     import traceback
                     st.code(traceback.format_exc())
 
