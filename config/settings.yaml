@@ -81,7 +81,7 @@ ml:
     
 # Grok AI 配置 (Phase 10.2)
 grok:
-  enabled: false
+  enabled: true
   # API Key 从环境变量 XAI_API_KEY 读取
   api_key_env: "XAI_API_KEY"
   # 模型选择
