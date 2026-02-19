@@ -19,6 +19,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import sys
+import os
 from pathlib import Path
 import copy
 
@@ -26,6 +27,17 @@ import copy
 project_root = str(Path(__file__).parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+
+# 加载 .env 文件 (Phase 10: Grok API Key)
+from pathlib import Path
+env_file = Path(project_root) / '.env'
+if env_file.exists():
+    with open(env_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ[key.strip()] = value.strip()
 
 from src.data.fetcher import DataFetcher
 from src.data.market import MARKET_CN, MARKET_US, get_market, get_stock_pool
