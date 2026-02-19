@@ -21,20 +21,24 @@ if __name__ == "__main__":
 
 from src.trading.trade_journal import TradeJournal
 from src.analysis.fundamental import FundamentalAnalyzer
+from src.trading.risk import RiskManager, RiskConfig
 
 
 class PortfolioManager:
     """持仓管理器"""
 
-    def __init__(self, db_path: str = "data/trade_journal.db"):
+    def __init__(self, db_path: str = "data/trade_journal.db",
+                 risk_config: Optional[RiskConfig] = None):
         """
         初始化持仓管理器
 
         Args:
             db_path: 交易日志数据库路径
+            risk_config: 风险配置，为None时使用默认配置
         """
         self.journal = TradeJournal(db_path=db_path)
         self.fundamental_analyzer = FundamentalAnalyzer()
+        self.risk_manager = RiskManager(risk_config)
 
     def get_portfolio_dashboard(self, market: str = "US") -> Dict:
         """
@@ -281,15 +285,32 @@ class PortfolioManager:
             return []
 
         rebalance_plan = []
+        risk_warnings = []
 
         # 当前持仓字典
         current_positions = {}
+        positions_for_risk = {}  # RiskManager格式: {code: (shares, cost)}
+        prices_for_risk = {}
         for _, row in current_holdings.iterrows():
             current_positions[row['code']] = {
                 'shares': row['total_shares'],
                 'value': row['market_value'],
                 'price': row['current_price'],
             }
+            positions_for_risk[row['code']] = (
+                row['total_shares'], row['average_cost']
+            )
+            prices_for_risk[row['code']] = row['current_price']
+
+        # 风险检查: 计算当前持仓风险
+        if positions_for_risk:
+            self.risk_manager.calculate_position_risk(
+                positions_for_risk, prices_for_risk, total_portfolio_value
+            )
+            # 检查是否有止损/止盈信号
+            stop_orders = self.risk_manager.get_stop_loss_orders()
+            for order in stop_orders:
+                risk_warnings.append(order['reason'])
 
         # 处理每个目标股票
         all_codes = set(list(target_weights.keys()) + list(current_positions.keys()))
@@ -310,7 +331,6 @@ class PortfolioManager:
 
             # 需要获取当前价格 (如果不是现有持仓)
             if code not in current_positions:
-                # TODO: 获取实时价格
                 current_price = self._get_current_price(code, market)
                 if current_price == 0:
                     logger.warning(f"无法获取{code}的当前价格,跳过")
@@ -325,14 +345,37 @@ class PortfolioManager:
                     shares_diff = (shares_diff // 100) * 100
 
                 if shares_diff > 0:
-                    rebalance_plan.append({
-                        'action': 'buy',
-                        'code': code,
-                        'price': current_price,
-                        'shares': shares_diff,
-                        'amount': shares_diff * current_price,
-                        'reason': f'调整至目标权重{target_weight:.1%}',
-                    })
+                    # 风险检查: 买入前验证仓位限制
+                    allowed, reason = self.risk_manager.check_trade_risk(
+                        code=code, action='buy', shares=shares_diff,
+                        price=current_price,
+                        current_positions=positions_for_risk,
+                        total_equity=total_portfolio_value,
+                    )
+                    if not allowed:
+                        risk_warnings.append(f"{code}: {reason}")
+                        # 降低到允许的最大仓位
+                        max_value = (
+                            total_portfolio_value
+                            * self.risk_manager.config.max_position_pct
+                            - current_value
+                        )
+                        if max_value > min_trade_amount:
+                            shares_diff = int(max_value / current_price)
+                            if market == "CN":
+                                shares_diff = (shares_diff // 100) * 100
+                        else:
+                            continue
+
+                    if shares_diff > 0:
+                        rebalance_plan.append({
+                            'action': 'buy',
+                            'code': code,
+                            'price': current_price,
+                            'shares': shares_diff,
+                            'amount': shares_diff * current_price,
+                            'reason': f'调整至目标权重{target_weight:.1%}',
+                        })
                 elif shares_diff < 0:
                     rebalance_plan.append({
                         'action': 'sell',
@@ -342,6 +385,13 @@ class PortfolioManager:
                         'amount': abs(shares_diff) * current_price,
                         'reason': f'调整至目标权重{target_weight:.1%}',
                     })
+
+        # 将风险警告附加到调仓计划
+        if risk_warnings:
+            for plan_item in rebalance_plan:
+                plan_item.setdefault('risk_warnings', [])
+            if rebalance_plan:
+                rebalance_plan[0]['risk_warnings'] = risk_warnings
 
         return rebalance_plan
 

@@ -433,6 +433,218 @@ class DataFetcher:
             logger.warning(f"获取美股基本面数据失败: {e}")
         return result
 
+    # ==================== 行研报告数据 (Phase 10.1) ====================
+
+    def get_research_data(self, code: str, market: str = "CN") -> Dict:
+        """获取行研报告结构化数据（带缓存）
+
+        Returns:
+            {
+                'recommendations': DataFrame,   # 分析师评级历史
+                'price_targets': Dict,           # 一致目标价
+                'earnings_estimate': DataFrame,  # EPS一致预期
+                'revenue_estimate': DataFrame,   # 营收一致预期
+            }
+        缓存有效期: 24小时
+        """
+        # 尝试从缓存加载（24小时内有效）
+        if self.use_cache and self.cache:
+            cached = self.cache.load_research(code, market)
+            if cached:
+                logger.debug(f"行研数据缓存命中: {market}/{code}")
+                return cached
+
+        if market == "US":
+            data = self._get_research_us(code)
+        else:
+            data = self._get_research_cn(code)
+
+        # 写入缓存
+        if self.use_cache and self.cache and data:
+            self.cache.save_research(code, data, market)
+
+        return data
+
+    @rate_limit(min_interval=0.5)
+    def _get_research_us(self, code: str) -> Dict:
+        """美股行研数据 - 基于 yfinance 内置 API
+
+        一次创建 Ticker 对象，批量获取所有行研字段。
+        yfinance 数据来源于 Yahoo Finance 汇总的华尔街主流投行公开研报结论。
+        """
+        result = {}
+        if yf is None:
+            return result
+
+        try:
+            ticker = yf.Ticker(code)
+
+            # 1. 分析师评级历史
+            #    DataFrame: [date, firm, to_grade, from_grade, action]
+            #    action: "upgrade"/"downgrade"/"initiated"/"reiterated"
+            try:
+                recs = ticker.recommendations
+                if recs is not None and isinstance(recs, pd.DataFrame) and not recs.empty:
+                    result['recommendations'] = recs
+            except Exception as e:
+                logger.debug(f"获取 {code} 评级历史失败: {e}")
+
+            # 2. 一致目标价
+            #    {current, low, high, mean, median}
+            try:
+                targets = ticker.analyst_price_targets
+                if targets is not None:
+                    # 转为标准 dict
+                    if isinstance(targets, dict):
+                        result['price_targets'] = targets
+                    elif hasattr(targets, 'to_dict'):
+                        result['price_targets'] = targets.to_dict()
+                    else:
+                        result['price_targets'] = {
+                            'current': getattr(targets, 'current', None),
+                            'low': getattr(targets, 'low', None),
+                            'high': getattr(targets, 'high', None),
+                            'mean': getattr(targets, 'mean', None),
+                            'median': getattr(targets, 'median', None),
+                        }
+            except Exception as e:
+                logger.debug(f"获取 {code} 目标价失败: {e}")
+
+            # 3. EPS盈利预测
+            try:
+                earnings = ticker.earnings_estimate
+                if earnings is not None and isinstance(earnings, pd.DataFrame) and not earnings.empty:
+                    result['earnings_estimate'] = earnings
+            except Exception as e:
+                logger.debug(f"获取 {code} 盈利预测失败: {e}")
+
+            # 4. 营收预测
+            try:
+                revenue = ticker.revenue_estimate
+                if revenue is not None and isinstance(revenue, pd.DataFrame) and not revenue.empty:
+                    result['revenue_estimate'] = revenue
+            except Exception as e:
+                logger.debug(f"获取 {code} 营收预测失败: {e}")
+
+        except Exception as e:
+            logger.warning(f"获取 {code} 行研数据失败: {e}")
+
+        return result
+
+    @rate_limit(min_interval=1.0)
+    def _get_research_cn(self, code: str) -> Dict:
+        """A股行研数据 - 基于 AKShare 免费接口
+
+        数据来源:
+          - ak.stock_profit_forecast_em(): 盈利预测(机构预测EPS/营收)
+          - ak.stock_comment_detail_zlkp_jgcyd_em(): 机构参与度
+          - 评级数据通过东方财富接口获取
+
+        Returns:
+            {
+                'recommendations': DataFrame,  # 模拟评级(基于机构预测方向)
+                'price_targets': Dict,         # 一致目标价(如有)
+                'earnings_estimate': DataFrame, # 盈利预测
+            }
+        """
+        if ak is None:
+            return {}
+
+        result = {}
+        # 标准化代码: 去掉后缀 (如 000001.SZ → 000001)
+        pure_code = code.split('.')[0] if '.' in code else code
+
+        # 1. 盈利预测数据（机构一致预期）
+        try:
+            df_forecast = ak.stock_profit_forecast_em(symbol=pure_code)
+            if df_forecast is not None and not df_forecast.empty:
+                result['earnings_estimate'] = df_forecast
+                logger.debug(f"A股 {code} 盈利预测数据获取成功: {len(df_forecast)} 条")
+        except Exception as e:
+            logger.debug(f"A股 {code} 盈利预测获取失败: {e}")
+
+        # 2. 个股评级汇总（东方财富）
+        try:
+            df_comment = ak.stock_comment_detail_zlkp_jgcyd_em(symbol=pure_code)
+            if df_comment is not None and not df_comment.empty:
+                result['institutional_activity'] = df_comment
+        except Exception as e:
+            logger.debug(f"A股 {code} 机构参与度获取失败: {e}")
+
+        # 3. 将盈利预测转换为类似评级的结构（模拟 recommendations）
+        # 通过预测EPS变化方向来推断一致预期方向
+        if 'earnings_estimate' in result:
+            try:
+                recs = self._cn_forecast_to_recommendations(result['earnings_estimate'], pure_code)
+                if recs is not None and not recs.empty:
+                    result['recommendations'] = recs
+            except Exception as e:
+                logger.debug(f"A股 {code} 评级转换失败: {e}")
+
+        return result
+
+    def _cn_forecast_to_recommendations(self, forecast_df: pd.DataFrame,
+                                         code: str) -> Optional[pd.DataFrame]:
+        """将A股盈利预测数据转换为与美股 recommendations 兼容的格式
+
+        AKShare stock_profit_forecast_em 返回列通常包含:
+        研究机构, 研究员, 预测年度, 预测指标, 预测值, 发布日期 等
+
+        转换策略:
+        - 有盈利增长预测 → "Buy"
+        - 盈利持平预测 → "Hold"
+        - 盈利下降预测 → "Underperform"
+        """
+        if forecast_df is None or forecast_df.empty:
+            return None
+
+        records = []
+        now = datetime.now()
+
+        for _, row in forecast_df.iterrows():
+            try:
+                # 识别列名（AKShare返回可能有不同列名格式）
+                firm = str(row.get('研究机构', row.get('机构名称', '')))
+                if not firm:
+                    continue
+
+                # 尝试获取发布日期
+                date_val = row.get('发布日期', row.get('日期', now))
+                try:
+                    date = pd.to_datetime(date_val)
+                except Exception:
+                    date = now
+
+                # 推断评级方向：基于预测指标
+                # 不同AKShare版本列名可能不同，做容错处理
+                grade = 'Hold'  # 默认中性
+                action = 'reiterated'
+
+                # 尝试从"评级"列直接获取
+                rating_str = str(row.get('最新评级', row.get('评级', ''))).strip()
+                if rating_str:
+                    if rating_str in ('买入', '强烈推荐', '推荐', '增持'):
+                        grade = 'Buy'
+                    elif rating_str in ('中性', '持有', '观望'):
+                        grade = 'Hold'
+                    elif rating_str in ('减持', '卖出', '回避'):
+                        grade = 'Underperform'
+
+                records.append({
+                    'Date': date,
+                    'firm': firm,
+                    'to_grade': grade,
+                    'from_grade': '',
+                    'action': action,
+                })
+            except Exception:
+                continue
+
+        if not records:
+            return None
+
+        return pd.DataFrame(records)
+
     # ==================== 宏观经济数据 ====================
 
     def get_macro_data(self) -> Dict[str, pd.Series]:

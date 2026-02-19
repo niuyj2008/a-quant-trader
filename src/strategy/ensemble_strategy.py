@@ -397,6 +397,85 @@ def create_ensemble_strategy(strategy_configs: List[Dict],
     return EnsembleStrategy(strategies, method=method, weights=weights)
 
 
+class InterpretableStrategyAdapter:
+    """将 InterpretableStrategy (analyze_stock) 适配为 EnsembleStrategy 可用的接口
+
+    EnsembleStrategy 要求子策略实现 generate_signals(df, date, context) -> List[Dict]
+    InterpretableStrategy 的接口是 analyze_stock(code, df, financial_data, ...) -> DecisionReport
+
+    本适配器桥接两者，使6个可解释策略可以作为 EnsembleStrategy 的子策略参与集成。
+
+    用法:
+        from src.strategy.interpretable_strategy import BalancedMultiFactorStrategy
+        adapter = InterpretableStrategyAdapter(BalancedMultiFactorStrategy())
+        ensemble = EnsembleStrategy([adapter, ...], method='weighted')
+        signals = ensemble.generate_signals(df, date, context={'code': 'AAPL', ...})
+    """
+
+    def __init__(self, strategy):
+        """
+        Args:
+            strategy: BaseInterpretableStrategy 的子类实例
+        """
+        self.strategy = strategy
+        self.__class__.__name__ = f"Adapted_{strategy.__class__.__name__}"
+
+    def generate_signals(self, df: pd.DataFrame, date: str,
+                        context: Optional[Dict] = None) -> List[Dict]:
+        """将 analyze_stock 结果转换为 EnsembleStrategy 信号格式
+
+        Args:
+            df: 历史行情数据
+            date: 当前日期
+            context: 上下文信息，需包含:
+                - code: 股票代码（必需）
+                - name: 股票名称（可选）
+                - financial_data: 财务数据（可选）
+                - research_data: 行研数据（可选）
+                - sentiment_data: 情绪数据（可选）
+
+        Returns:
+            List[Dict]: EnsembleStrategy 兼容的信号列表
+        """
+        ctx = context or {}
+        code = ctx.get('code', 'UNKNOWN')
+
+        try:
+            report = self.strategy.analyze_stock(
+                code=code,
+                df=df,
+                financial_data=ctx.get('financial_data'),
+                name=ctx.get('name', ''),
+                research_data=ctx.get('research_data'),
+                sentiment_data=ctx.get('sentiment_data'),
+                grok_data=ctx.get('grok_data'),
+            )
+        except Exception as e:
+            logger.debug(f"适配器调用 {self.strategy.__class__.__name__} 失败: {e}")
+            return []
+
+        if report is None:
+            return []
+
+        # hold 信号不产生交易信号（EnsembleStrategy 约定：空列表=持有）
+        if report.action in ('hold',):
+            return []
+
+        signal = {
+            'action': report.action,
+            'reason': report.summary or '; '.join(report.reasoning[:2]),
+            'confidence': report.confidence / 100.0,  # DecisionReport 0-100 → Ensemble 0-1
+            'score': report.score,
+            'strategy_name': report.strategy_name,
+            'factor_scores': report.factor_scores,
+            'stop_loss': report.stop_loss_price,
+            'target_price': report.target_price,
+            'risk_warnings': report.risk_warnings,
+        }
+
+        return [signal]
+
+
 # 示例: 如何使用策略集成
 if __name__ == "__main__":
     from src.strategy.interpretable_strategy import InterpretableStrategy

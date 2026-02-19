@@ -49,6 +49,7 @@ class FactorEngine:
         self.register("beta", lambda df: self.beta(df))
         self.register("downside_vol", lambda df: self.downside_volatility(df, 20))
         self.register("support_resistance", self.support_resistance)
+        self.register("adx", lambda df: self.adx(df, 14))
 
     def register(self, name: str, func: Callable):
         """注册自定义因子"""
@@ -81,7 +82,7 @@ class FactorEngine:
             'ma_5', 'ma_20', 'ma_60',
             'volatility_20', 'rsi_14', 'macd', 'bollinger',
             'volume_ratio', 'atr_14', 'ma_cross', 'price_position',
-            'volume_ma_ratio', 'beta', 'downside_vol',
+            'volume_ma_ratio', 'beta', 'downside_vol', 'adx',
         ]
         return self.compute(df, core_factors)
 
@@ -173,14 +174,68 @@ class FactorEngine:
         return df['volume'] / vol_ma
 
     @staticmethod
-    def beta(df: pd.DataFrame, period: int = 60) -> pd.Series:
-        """Beta因子（与自身趋势的相关性，简化版）"""
+    def beta(df: pd.DataFrame, period: int = 60, benchmark_col: str = 'benchmark_close') -> pd.Series:
+        """Beta因子：个股收益相对市场基准的系统性风险
+
+        如果df中包含 benchmark_close 列，则用真实市场基准计算 Cov(Ri, Rm)/Var(Rm)。
+        否则用等权全市场代理（个股收益的滚动均值）近似。
+        """
         returns = df['close'].pct_change()
-        market_return = returns.rolling(period).mean()  # 简化：用自身均值代替指数
-        cov = returns.rolling(period).cov(market_return)
-        var = market_return.rolling(period).var()
+
+        if benchmark_col in df.columns:
+            # 使用真实市场基准（SPY/沪深300等）
+            market_returns = df[benchmark_col].pct_change()
+        else:
+            # 降级：用个股收益的滚动均值近似市场（保持向后兼容）
+            market_returns = returns.rolling(period).mean()
+
+        cov = returns.rolling(period).cov(market_returns)
+        var = market_returns.rolling(period).var()
         var = var.replace(0, np.nan)
         return cov / var
+
+    @staticmethod
+    def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """ADX（平均方向运动指数）: 衡量趋势强度，值越大趋势越强
+
+        标准Wilder算法：
+        1. 计算+DM和-DM（方向运动）
+        2. 计算TR（真实波幅）
+        3. 平滑得到+DI和-DI
+        4. 计算DX = |+DI - -DI| / (+DI + -DI)
+        5. ADX = DX的平滑值
+        """
+        high = df['high']
+        low = df['low']
+        close = df['close']
+
+        # +DM 和 -DM
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        # TR（真实波幅）
+        high_low = high - low
+        high_close = (high - close.shift(1)).abs()
+        low_close = (low - close.shift(1)).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+
+        # Wilder平滑（等效于EMA with alpha=1/period）
+        atr = tr.ewm(alpha=1.0 / period, min_periods=period).mean()
+        plus_di = 100 * plus_dm.ewm(alpha=1.0 / period, min_periods=period).mean() / atr
+        minus_di = 100 * minus_dm.ewm(alpha=1.0 / period, min_periods=period).mean() / atr
+
+        # DX
+        di_sum = plus_di + minus_di
+        di_sum = di_sum.replace(0, np.nan)
+        dx = 100 * (plus_di - minus_di).abs() / di_sum
+
+        # ADX = DX的Wilder平滑
+        adx_val = dx.ewm(alpha=1.0 / period, min_periods=period).mean()
+
+        return adx_val
 
     @staticmethod
     def downside_volatility(df: pd.DataFrame, period: int = 20) -> pd.Series:
@@ -252,7 +307,7 @@ FACTOR_CATEGORIES = {
         "description": "基于价格和成交量的技术分析指标",
     },
     "波动/风险": {
-        "factors": ["volatility_20", "atr_14", "beta", "downside_vol"],
+        "factors": ["volatility_20", "atr_14", "beta", "downside_vol", "adx"],
         "description": "衡量风险和价格波动程度",
     },
     "成交量": {

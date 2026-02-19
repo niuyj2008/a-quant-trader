@@ -385,34 +385,45 @@ class StockPredictor:
         """
         self.feature_cols = feature_cols
         
-        # 合并所有股票数据
+        # 合并所有股票数据（保留时间索引，按时间排序防止数据泄露）
         all_data = []
         for code, df in data.items():
             df = self.create_target(df, lookahead, threshold)
             df['code'] = code
             all_data.append(df)
-        
-        combined = pd.concat(all_data, ignore_index=True)
+
+        # 保留原始日期索引用于时间排序（不使用 ignore_index）
+        combined = pd.concat(all_data)
         combined = combined.dropna(subset=feature_cols + ['target'])
-        
+
+        # 按日期排序，确保训练集在前、测试集在后（时间隔离）
+        if not isinstance(combined.index, pd.DatetimeIndex):
+            if 'date' in combined.columns:
+                combined = combined.sort_values('date')
+            # 如果索引不是日期且无date列，按原始顺序保留
+        else:
+            combined = combined.sort_index()
+
         logger.info(f"训练数据量: {len(combined)} 条")
-        
+
         # 准备特征
         X, y = self.model.prepare_features(combined, feature_cols, 'target')
-        
-        # 时间序列划分
+
+        # 时间序列划分（按时间顺序，前80%训练、后20%测试）
         train_size = int(len(X) * 0.8)
         X_train, X_test = X[:train_size], X[train_size:]
         y_train, y_test = y[:train_size], y[train_size:]
-        
+
+        logger.info(f"训练集: {len(X_train)} 条, 测试集: {len(X_test)} 条 (时间序列切分)")
+
         # 训练
         self.model.fit(X_train, y_train)
-        
+
         # 评估
         metrics = self.model.evaluate(X_test, y_test)
-        
+
         logger.info(f"测试集评估: {metrics.to_dict()}")
-        
+
         return metrics
     
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:

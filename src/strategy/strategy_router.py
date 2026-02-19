@@ -7,11 +7,12 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from loguru import logger
 
 from src.factors.factor_engine import FactorEngine
+from src.factors.macro_factors import MarketRegimeHMM, MacroRegimeDetector, MarketRegime
 
 
 @dataclass
@@ -38,10 +39,57 @@ class StrategyRouter:
     - 波动率极低 + 趋势稳定 → 防御 → low_vol
     - 有财务数据 + PE低位 → value
     - 难以判断 → balanced（兜底）
+
+    支持反馈机制：从历史信号日志中学习各策略在不同市场状态下的实际表现，
+    用历史胜率调整未来推荐权重。
     """
 
     def __init__(self):
         self.factor_engine = FactorEngine()
+        self._strategy_performance = {}  # {strategy: {win_rate, avg_return, n_signals}}
+        self._regime_detector = MarketRegimeHMM()
+        self._macro_detector = MacroRegimeDetector()
+
+    def load_feedback(self, market: str = "US"):
+        """从signal_log加载各策略的历史表现，用于调整推荐权重
+
+        Args:
+            market: 市场代码
+        """
+        try:
+            from src.data.data_cache import DataCache
+            cache = DataCache()
+            signals = cache.load_signals(market=market, limit=10000)
+            if signals.empty:
+                return
+
+            # 只看有回填收益的信号
+            filled = signals[signals['return_5d'].notna()].copy()
+            if filled.empty:
+                return
+
+            for strategy, group in filled.groupby('strategy'):
+                buy_signals = group[group['action'].isin(['buy', 'add'])]
+                if len(buy_signals) < 3:
+                    continue
+
+                win_rate = (buy_signals['return_5d'] > 0).mean()
+                avg_return = buy_signals['return_5d'].mean()
+
+                self._strategy_performance[strategy] = {
+                    'win_rate': float(win_rate),
+                    'avg_return': float(avg_return),
+                    'n_signals': len(buy_signals),
+                }
+
+            if self._strategy_performance:
+                logger.info(f"路由器反馈已加载: {len(self._strategy_performance)} 个策略的历史表现")
+        except Exception as e:
+            logger.debug(f"加载路由器反馈失败: {e}")
+
+    def get_performance_summary(self) -> Dict[str, Dict]:
+        """获取各策略历史表现摘要"""
+        return self._strategy_performance
 
     def recommend(self, code: str, df: pd.DataFrame,
                   financial_data: Optional[Dict] = None,
@@ -145,6 +193,37 @@ class StrategyRouter:
         # 6. balanced 作为兜底
         scores['balanced'] = (50, "综合多因子均衡分析")
 
+        # ===== 反馈调整：用历史胜率修正策略得分 =====
+        if self._strategy_performance:
+            for key in list(scores.keys()):
+                if key in self._strategy_performance:
+                    perf = self._strategy_performance[key]
+                    win_rate = perf['win_rate']
+                    n = perf['n_signals']
+                    # 只在有足够样本(>=10)时调整，调整幅度 ±15分
+                    if n >= 10:
+                        # win_rate=0.5 → 不调整, >0.5 → 加分, <0.5 → 减分
+                        adjustment = (win_rate - 0.5) * 30  # 最大±15分
+                        old_score, reason = scores[key]
+                        new_score = max(10, min(100, old_score + adjustment))
+                        scores[key] = (new_score, f"{reason} [历史胜率{win_rate:.0%}({n}次)]")
+
+        # ===== 市场状态识别（HMM优先，规则引擎降级）=====
+        regime, regime_conf, regime_desc = self._regime_detector.detect_regime(
+            df, adx=adx, vol20=vol20, m20=m20, rsi=rsi
+        )
+
+        # 市场状态修正: 根据 regime 调整各策略得分
+        for key in list(scores.keys()):
+            modifier = self._regime_detector.get_strategy_modifier(regime, key)
+            if modifier != 1.0:
+                old_score, reason = scores[key]
+                new_score = max(10, min(100, old_score * modifier))
+                if modifier > 1.0:
+                    scores[key] = (new_score, f"{reason} [市场状态利好×{modifier:.2f}]")
+                else:
+                    scores[key] = (new_score, f"{reason} [市场状态不利×{modifier:.2f}]")
+
         # ===== 排名 =====
         ranked = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
 
@@ -157,23 +236,20 @@ class StrategyRouter:
             result.secondary_reason = ranked[1][1][1]
 
         # 识别不适用策略
-        all_keys = {'balanced', 'momentum', 'value', 'low_vol', 'reversion', 'breakout'}
         recommended = {result.primary_strategy, result.secondary_strategy}
         excluded = []
 
         if adx > 30 and trend_aligned:
-            excluded.append('reversion')  # 强趋势中不宜逆向
+            excluded.append('reversion')
         if vol20 > 0.05:
-            excluded.append('low_vol')    # 高波动不适合防御
+            excluded.append('low_vol')
         if rsi > 75:
-            excluded.append('momentum')   # 超买不宜追涨
+            excluded.append('momentum')
         if not financial_data:
-            excluded.append('value')      # 无基本面数据不适合价值策略
+            excluded.append('value')
 
         result.excluded_strategies = [s for s in excluded if s not in recommended]
-
-        # 市场状态描述
-        result.market_regime = self._describe_regime(adx, vol20, m20, rsi)
+        result.market_regime = regime_desc
 
         return result
 
@@ -220,32 +296,10 @@ class StrategyRouter:
             counts[r.primary_strategy] = counts.get(r.primary_strategy, 0) + 1
         return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
-    def _describe_regime(self, adx: float, vol: float, m20: float, rsi: float) -> str:
-        """描述当前市场状态"""
-        parts = []
+    def get_current_regime(self, df: pd.DataFrame) -> Tuple[MarketRegime, float, str]:
+        """获取当前市场状态（供外部调用）
 
-        if adx > 25:
-            parts.append("趋势强")
-        elif adx < 15:
-            parts.append("无趋势")
-        else:
-            parts.append("趋势弱")
-
-        if vol > 0.04:
-            parts.append("高波动")
-        elif vol < 0.02:
-            parts.append("低波动")
-
-        if m20 > 0.05:
-            parts.append("上涨")
-        elif m20 < -0.05:
-            parts.append("下跌")
-        else:
-            parts.append("震荡")
-
-        if rsi > 70:
-            parts.append("超买")
-        elif rsi < 30:
-            parts.append("超卖")
-
-        return " | ".join(parts)
+        Returns:
+            (MarketRegime, confidence, description)
+        """
+        return self._regime_detector.detect_regime(df)

@@ -224,6 +224,90 @@ class DataCache:
         df['date'] = pd.to_datetime(df['date'])
         return df.set_index('date')['value']
 
+    # ==================== 行研数据缓存 (Phase 10.1) ====================
+
+    def save_research(self, code: str, data: Dict, market: str = "CN"):
+        """保存行研数据到缓存（JSON序列化存储）"""
+        import json
+
+        # 将 DataFrame 转为 JSON 字符串存储
+        serializable = {}
+        for key, val in data.items():
+            if isinstance(val, pd.DataFrame):
+                serializable[key] = val.to_json(date_format='iso')
+            elif isinstance(val, dict):
+                serializable[key] = json.dumps(val)
+            else:
+                serializable[key] = str(val)
+
+        json_str = json.dumps(serializable, ensure_ascii=False)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_data (
+                    market TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    data_json TEXT,
+                    updated_at TEXT,
+                    PRIMARY KEY (market, code)
+                )
+            """)
+            conn.execute("""
+                INSERT OR REPLACE INTO research_data (market, code, data_json, updated_at)
+                VALUES (?, ?, ?, ?)
+            """, (market, code, json_str, now))
+            conn.commit()
+        logger.debug(f"缓存行研数据: {market}/{code}")
+
+    def load_research(self, code: str, market: str = "CN") -> Optional[Dict]:
+        """从缓存加载行研数据（24小时有效）"""
+        import json
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 检查表是否存在
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='research_data'"
+                ).fetchone()
+                if not table_exists:
+                    return None
+
+                row = conn.execute(
+                    "SELECT data_json, updated_at FROM research_data WHERE market=? AND code=?",
+                    (market, code)
+                ).fetchone()
+
+            if not row:
+                return None
+
+            # 检查是否过期（24小时）
+            updated_at = datetime.strptime(row[1], '%Y-%m-%d %H:%M:%S')
+            if (datetime.now() - updated_at).total_seconds() > 86400:
+                return None
+
+            serialized = json.loads(row[0])
+            result = {}
+            for key, val_str in serialized.items():
+                if key in ('recommendations', 'earnings_estimate', 'revenue_estimate'):
+                    try:
+                        result[key] = pd.read_json(val_str)
+                    except Exception:
+                        pass
+                elif key == 'price_targets':
+                    try:
+                        result[key] = json.loads(val_str)
+                    except Exception:
+                        pass
+                else:
+                    result[key] = val_str
+
+            return result if result else None
+
+        except Exception as e:
+            logger.debug(f"加载行研缓存失败: {e}")
+            return None
+
     # ==================== 信号日志 ====================
 
     def save_signal(self, date: str, code: str, strategy: str, action: str,
@@ -292,6 +376,84 @@ class DataCache:
                 ORDER BY date
             """, conn, params=[market])
         return df
+
+    def batch_backfill_returns(self, fetcher, market: str = "CN") -> Dict[str, int]:
+        """批量回填信号收益
+
+        对所有pending信号，获取信号日之后的价格数据，计算5/10/20日真实收益。
+
+        Args:
+            fetcher: DataFetcher实例，用于获取价格数据
+            market: 市场代码
+
+        Returns:
+            {'total': 待回填数, 'filled': 已回填数, 'skipped': 跳过数}
+        """
+        pending = self.get_pending_backfill_signals(market=market)
+        if pending.empty:
+            return {'total': 0, 'filled': 0, 'skipped': 0}
+
+        filled = 0
+        skipped = 0
+        today = datetime.now()
+
+        # 按股票代码分组，减少API调用
+        for code, group in pending.groupby('code'):
+            try:
+                # 获取该股票的历史数据
+                earliest_date = group['date'].min()
+                df = fetcher.get_daily_data(code, start_date=earliest_date, market=market)
+                if df is None or df.empty:
+                    skipped += len(group)
+                    continue
+
+                # 确保索引是datetime
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+
+                for _, signal in group.iterrows():
+                    signal_date = pd.to_datetime(signal['date'])
+                    signal_price = signal.get('price_at_signal', 0)
+
+                    if signal_price is None or signal_price <= 0:
+                        # 尝试从数据中获取信号日价格
+                        if signal_date in df.index:
+                            signal_price = df.loc[signal_date, 'close']
+                        else:
+                            skipped += 1
+                            continue
+
+                    # 计算各期限收益
+                    r5, r10, r20 = None, None, None
+                    future_dates = df.index[df.index > signal_date]
+
+                    if len(future_dates) >= 5 and signal['return_5d'] is None:
+                        price_5d = df.loc[future_dates[4], 'close']
+                        r5 = (price_5d - signal_price) / signal_price
+
+                    if len(future_dates) >= 10 and signal['return_10d'] is None:
+                        price_10d = df.loc[future_dates[9], 'close']
+                        r10 = (price_10d - signal_price) / signal_price
+
+                    if len(future_dates) >= 20 and signal['return_20d'] is None:
+                        price_20d = df.loc[future_dates[19], 'close']
+                        r20 = (price_20d - signal_price) / signal_price
+
+                    if r5 is not None or r10 is not None or r20 is not None:
+                        self.backfill_signal_returns(
+                            signal_id=signal['id'],
+                            return_5d=r5, return_10d=r10, return_20d=r20
+                        )
+                        filled += 1
+                    else:
+                        skipped += 1
+
+            except Exception as e:
+                logger.debug(f"回填 {code} 信号收益失败: {e}")
+                skipped += len(group)
+
+        logger.info(f"信号收益回填完成: 总计{len(pending)}, 已填{filled}, 跳过{skipped}")
+        return {'total': len(pending), 'filled': filled, 'skipped': skipped}
 
     # ==================== 训练历史记录 ====================
 

@@ -289,35 +289,45 @@ class BacktestEngine:
         
         logger.info(f"开始回测: {all_dates[0]} 至 {all_dates[-1]}")
         
-        # 逐日回测
+        # 逐日回测（next-bar execution: 信号在Day N收盘后生成，Day N+1开盘价成交）
+        pending_signals = []  # 上一日产生的待执行信号
+
         for date in all_dates:
             # 获取当日数据
             daily_data = {}
             daily_prices = {}
+            daily_opens = {}
             for code, df in data.items():
                 if date in df.index:
                     daily_data[code] = df.loc[:date]
                     daily_prices[code] = df.loc[date, 'close']
-            
+                    if 'open' in df.columns:
+                        daily_opens[code] = df.loc[date, 'open']
+                    else:
+                        daily_opens[code] = df.loc[date, 'close']
+
             # 更新持仓价格
             self.update_prices(daily_prices, date)
-            
-            # 执行策略
-            signals = strategy(self, date, daily_data)
-            
-            # 处理交易信号
-            if signals:
-                for signal in signals:
+
+            # 先执行昨日信号（以今日开盘价成交，消除前瞻偏差）
+            if pending_signals:
+                for signal in pending_signals:
                     code = signal['code']
                     action = signal['action']
                     shares = signal.get('shares', 100)
-                    
-                    if code in daily_prices:
-                        price = daily_prices[code]
+
+                    if code in daily_opens:
+                        price = daily_opens[code]
                         if action == 'buy':
                             self.buy(code, price, shares, date)
                         elif action == 'sell':
                             self.sell(code, price, shares, date)
+                pending_signals = []
+
+            # 用当日收盘数据生成信号（次日执行）
+            signals = strategy(self, date, daily_data)
+            if signals:
+                pending_signals = signals
         
         # 生成回测结果
         result = self._calculate_metrics()
@@ -363,15 +373,21 @@ class BacktestEngine:
         if result.max_drawdown != 0:
             result.calmar_ratio = -result.annual_return / result.max_drawdown
         
-        # 胜率和盈亏比
+        # 胜率和盈亏比（配对buy/sell交易计算盈亏）
         if self.trades:
-            buy_trades = {t.code: t for t in self.trades if t.direction == 'buy'}
+            # 按股票代码分组，顺序配对buy/sell
+            from collections import defaultdict
+            buy_queue = defaultdict(list)  # code -> [buy_trade, ...]
+            for t in self.trades:
+                if t.direction == 'buy':
+                    buy_queue[t.code].append(t)
+
             sell_trades = [t for t in self.trades if t.direction == 'sell']
-            
+
             profits = []
             for sell in sell_trades:
-                if sell.code in buy_trades:
-                    buy = buy_trades[sell.code]
+                if buy_queue[sell.code]:
+                    buy = buy_queue[sell.code].pop(0)  # FIFO配对
                     profit = (sell.price - buy.price) * sell.shares
                     profits.append(profit)
             

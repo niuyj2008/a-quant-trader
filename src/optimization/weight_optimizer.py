@@ -35,27 +35,43 @@ class WeightOptimizer:
 
     def optimize_icir(self, factor_ic_results: Dict[str, 'FactorICResult'],
                       strategy_factors: List[str],
-                      min_weight: float = 0.05) -> Dict[str, float]:
-        """方法A：基于IC_IR加权
+                      min_weight: float = 0.05,
+                      correlation_matrix: Optional[pd.DataFrame] = None,
+                      corr_penalty_threshold: float = 0.7) -> Dict[str, float]:
+        """方法A：基于IC_IR加权（含相关性惩罚）
 
         权重与因子的|IC_IR|成正比，信息比率高的因子获得更高权重。
+        负IC因子会被标记为需要反转得分方向（在 factor_sign 中记录）。
+        高相关因子对会被降权，避免信息冗余。
 
         Args:
             factor_ic_results: 因子验证结果字典 {factor_name_fwdN: FactorICResult}
             strategy_factors: 该策略使用的因子名列表
             min_weight: 最低权重（防止完全剔除）
+            correlation_matrix: 因子相关性矩阵（来自FactorValidator）
+            corr_penalty_threshold: 相关性惩罚阈值（默认0.7）
 
         Returns:
             {因子名: 权重} 字典，权重之和为1
         """
         ic_ir_values = {}
+        self._factor_signs = {}  # 记录因子方向: +1=正向, -1=需反转
+
         for fname in strategy_factors:
             # 尝试匹配 fwd10 的结果
             key = f"{fname}_fwd10"
             if key in factor_ic_results:
-                ic_ir_values[fname] = abs(factor_ic_results[key].ic_ir)
+                raw_ic_ir = factor_ic_results[key].ic_ir
+                # 记录因子方向：正IC = 正向因子，负IC = 反向因子（需反转得分）
+                self._factor_signs[fname] = 1 if raw_ic_ir >= 0 else -1
+                ic_ir_values[fname] = abs(raw_ic_ir)
+                if raw_ic_ir < 0:
+                    logger.warning(
+                        f"因子 {fname} 的IC_IR为负({raw_ic_ir:.4f})，将反转其得分方向"
+                    )
             else:
                 ic_ir_values[fname] = 0.0
+                self._factor_signs[fname] = 1
 
         # 如果所有因子IC_IR都是0，返回等权
         total_ir = sum(ic_ir_values.values())
@@ -63,17 +79,46 @@ class WeightOptimizer:
             n = len(strategy_factors)
             return {f: 1.0 / n for f in strategy_factors}
 
-        # IC_IR加权
+        # 相关性惩罚: 对高相关因子对中IC_IR较低的那个降权
+        corr_penalties = {f: 1.0 for f in strategy_factors}
+        if correlation_matrix is not None and not correlation_matrix.empty:
+            available = [f for f in strategy_factors if f in correlation_matrix.columns]
+            for i, f1 in enumerate(available):
+                for f2 in available[i+1:]:
+                    corr_val = abs(correlation_matrix.loc[f1, f2])
+                    if corr_val > corr_penalty_threshold:
+                        # 惩罚IC_IR较低的因子
+                        ir1 = ic_ir_values.get(f1, 0)
+                        ir2 = ic_ir_values.get(f2, 0)
+                        weaker = f1 if ir1 <= ir2 else f2
+                        # 惩罚力度与相关性成正比: corr=0.7→不惩罚, corr=1.0→惩罚50%
+                        penalty = 1.0 - (corr_val - corr_penalty_threshold) / (1.0 - corr_penalty_threshold) * 0.5
+                        corr_penalties[weaker] = min(corr_penalties[weaker], penalty)
+                        logger.info(
+                            f"因子共线性惩罚: {f1}↔{f2} 相关性={corr_val:.2f}, "
+                            f"{weaker}权重×{penalty:.2f}"
+                        )
+
+        # IC_IR加权（含惩罚）
         weights = {}
         for fname in strategy_factors:
-            w = max(ic_ir_values[fname] / total_ir, min_weight)
-            weights[fname] = w
+            raw_w = ic_ir_values[fname] / total_ir
+            penalized_w = raw_w * corr_penalties.get(fname, 1.0)
+            weights[fname] = max(penalized_w, min_weight)
 
         # 归一化
         total = sum(weights.values())
         weights = {f: round(w / total, 4) for f, w in weights.items()}
 
         return weights
+
+    def get_factor_signs(self) -> Dict[str, int]:
+        """获取因子方向标记
+
+        Returns:
+            {因子名: 方向} +1=正向因子, -1=反向因子(得分需 100-score)
+        """
+        return getattr(self, '_factor_signs', {})
 
     def optimize_sharpe(self, data_dict: Dict[str, pd.DataFrame],
                         strategy, factor_names: List[str],
@@ -116,21 +161,27 @@ class WeightOptimizer:
 
     def _simulate_strategy_sharpe(self, data_dict: Dict[str, pd.DataFrame],
                                   strategy, weights: Dict[str, float]) -> float:
-        """用给定权重模拟策略收益，计算夏普比率"""
+        """用给定权重模拟策略收益，计算夏普比率（逐日滚动，无前瞻偏差）"""
         returns = []
+        hold_days = 20
 
         for code, df in data_dict.items():
             if df.empty or len(df) < 120:
                 continue
             try:
-                # 用后半段数据模拟
-                test_df = df.iloc[len(df) // 2:]
-                report = strategy.analyze_stock(code, test_df)
-                if report and report.action == "buy":
-                    # 简单模拟：买入后持有20天的收益
-                    if len(test_df) > 20:
-                        ret = (test_df.iloc[-1]['close'] - test_df.iloc[-21]['close']) / test_df.iloc[-21]['close']
-                        returns.append(ret)
+                split_idx = len(df) // 2
+                test_start = max(split_idx, 60)
+
+                # 逐日滚动测试
+                for i in range(test_start, len(df) - hold_days):
+                    window_df = df.iloc[:i + 1]
+                    report = strategy.analyze_stock(code, window_df)
+                    if report and report.action == "buy":
+                        buy_price = df.iloc[i]['close']
+                        sell_price = df.iloc[i + hold_days]['close']
+                        if buy_price > 0:
+                            ret = (sell_price - buy_price) / buy_price
+                            returns.append(ret)
             except Exception:
                 pass
 
@@ -141,7 +192,7 @@ class WeightOptimizer:
         std_ret = np.std(returns)
         if std_ret < 1e-10:
             return 0.0
-        return mean_ret / std_ret * np.sqrt(252 / 20)  # 年化夏普
+        return mean_ret / std_ret * np.sqrt(252 / hold_days)  # 年化夏普
 
     def walk_forward_validate(self, data_dict: Dict[str, pd.DataFrame],
                               factor_ic_results: Dict,

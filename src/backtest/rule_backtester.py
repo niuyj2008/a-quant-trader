@@ -128,7 +128,11 @@ class RuleBacktester:
         buy_th: float,
         sell_th: float,
     ) -> ThresholdResult:
-        """用指定阈值模拟策略在多只股票上的交易表现"""
+        """用指定阈值模拟策略在多只股票上的交易表现
+
+        修复前瞻偏差：逐日滚动窗口，每次只传入当日及之前的数据给策略，
+        并从信号日开始计算真实前向收益。
+        """
         all_returns = []
         trade_count = 0
         wins = 0
@@ -138,32 +142,32 @@ class RuleBacktester:
                 continue
 
             try:
-                # 用后半段数据作为测试集
-                test_df = df.iloc[len(df) // 2:]
-                if len(test_df) < 60:
-                    continue
+                # 前半段作为预热（策略需要足够历史数据计算指标），后半段逐日测试
+                split_idx = len(df) // 2
+                test_start = max(split_idx, 60)  # 至少60日预热
 
-                report = strategy.analyze_stock(code, test_df)
-                if report is None:
-                    continue
+                # 逐日滚动：每天只传入当日及之前的数据
+                for i in range(test_start, len(df) - self.hold_days):
+                    window_df = df.iloc[:i + 1]  # 只包含到当日的数据
 
-                score = report.score
-                current_price = report.current_price
-                if current_price is None or current_price <= 0:
-                    continue
+                    report = strategy.analyze_stock(code, window_df)
+                    if report is None:
+                        continue
 
-                # 买入信号
-                if score >= buy_th:
-                    ret = self._calc_forward_return(test_df, self.hold_days)
-                    if ret is not None:
-                        net_ret = ret - 2 * self.commission  # 双边成本
-                        all_returns.append(net_ret)
-                        trade_count += 1
-                        if net_ret > 0:
-                            wins += 1
+                    score = report.score
 
-                # 也统计卖出信号（做空等价：未买入=避免损失）
-                # 此处仅统计买入信号表现，卖出阈值通过控制不买入间接影响
+                    # 买入信号
+                    if score >= buy_th:
+                        # 从信号日(T)计算T+hold_days的真实前向收益
+                        buy_price = df.iloc[i]['close']
+                        sell_price = df.iloc[i + self.hold_days]['close']
+                        if buy_price > 0:
+                            ret = (sell_price - buy_price) / buy_price
+                            net_ret = ret - 2 * self.commission  # 双边成本
+                            all_returns.append(net_ret)
+                            trade_count += 1
+                            if net_ret > 0:
+                                wins += 1
 
             except Exception:
                 pass
@@ -280,7 +284,7 @@ class RuleBacktester:
         filter_fn: Optional[callable] = None,
         skip_condition: Optional[str] = None,
     ) -> Tuple[float, float]:
-        """在可选过滤条件下评估策略表现
+        """在可选过滤条件下评估策略表现（逐日滚动，无前瞻偏差）
 
         Returns:
             (sharpe, win_rate)
@@ -293,24 +297,29 @@ class RuleBacktester:
                 continue
 
             try:
-                test_df = df.iloc[len(df) // 2:]
-                if len(test_df) < 60:
-                    continue
+                split_idx = len(df) // 2
+                test_start = max(split_idx, 60)
 
-                # 如果有过滤函数，且不通过则跳过
-                if filter_fn is not None and not filter_fn(test_df):
-                    continue
+                for i in range(test_start, len(df) - self.hold_days):
+                    window_df = df.iloc[:i + 1]
 
-                report = strategy.analyze_stock(code, test_df)
-                if report is None or report.action != "buy":
-                    continue
+                    # 如果有过滤函数，且不通过则跳过
+                    if filter_fn is not None and not filter_fn(window_df):
+                        continue
 
-                ret = self._calc_forward_return(test_df, self.hold_days)
-                if ret is not None:
-                    net_ret = ret - 2 * self.commission
-                    returns.append(net_ret)
-                    if net_ret > 0:
-                        wins += 1
+                    report = strategy.analyze_stock(code, window_df)
+                    if report is None or report.action != "buy":
+                        continue
+
+                    # 从信号日计算真实前向收益
+                    buy_price = df.iloc[i]['close']
+                    sell_price = df.iloc[i + self.hold_days]['close']
+                    if buy_price > 0:
+                        ret = (sell_price - buy_price) / buy_price
+                        net_ret = ret - 2 * self.commission
+                        returns.append(net_ret)
+                        if net_ret > 0:
+                            wins += 1
             except Exception:
                 pass
 

@@ -76,8 +76,21 @@ def fetch_stock_data(code: str, start_date: str, market: str = "CN"):
 
 @st.cache_data(ttl=600)
 def fetch_financial_data(code: str, market: str = "CN"):
-    fetcher = get_fetcher_v4()
-    return fetcher.get_financial_data(code, market=market)
+    """获取基本面数据（PE/PB/ROE/营收增长等）
+
+    自动从yfinance(美股)或akshare(A股)获取真实数据。
+    如果获取失败返回空dict，策略会自动降级到纯技术面分析。
+    """
+    try:
+        fetcher = get_fetcher_v4()
+        data = fetcher.get_financial_data(code, market=market)
+        # 过滤掉值为None/0的字段
+        if data:
+            data = {k: v for k, v in data.items() if v is not None}
+        return data or {}
+    except Exception as e:
+        logger.debug(f"获取基本面数据失败 {code}: {e}")
+        return {}
 
 @st.cache_data(ttl=3600)
 def fetch_macro_data():
@@ -510,6 +523,7 @@ def render_stock_analysis(market_code, start_date):
             if strategy_mode == "🤖 智能推荐":
                 try:
                     router = StrategyRouter()
+                    router.load_feedback(market=market_code)
                     routing = router.recommend(code, df, financial_data=financial)
                     rec_col1, rec_col2 = st.columns([3, 2])
                     with rec_col1:
@@ -551,10 +565,12 @@ def render_stock_analysis(market_code, start_date):
 def _render_strategy_signals_panel(code, df, financial, selected_strategies, market_code):
     """策略信号子Tab — 基本面评分 + 策略信号概览 + 综合建议 + 详细分析"""
     # 基本面评分
-    if financial:
+    if financial and any(v for v in financial.values()):
         st.subheader("💎 基本面评分")
         _render_fundamental_scorecard(financial, market_code)
         st.markdown("---")
+    else:
+        st.caption("基本面数据不可用，策略将使用纯技术面分析（value策略可能不准确）")
 
     # 各策略分析
     results = {}
@@ -889,10 +905,25 @@ def _render_signal_log_panel(market_code):
             use_container_width=True, hide_index=True
         )
 
-        # 待回填
+        # 待回填 + 回填按钮
         pending = cache.get_pending_backfill_signals(market=market_code)
         if not pending.empty:
-            st.warning(f"有 {len(pending)} 条信号待收益回填（需等待5/10/20交易日后自动回填）")
+            col_bf1, col_bf2 = st.columns([3, 1])
+            with col_bf1:
+                st.warning(f"有 {len(pending)} 条信号待收益回填")
+            with col_bf2:
+                if st.button("📊 回填收益", key="sl_backfill"):
+                    with st.spinner("正在回填信号收益..."):
+                        try:
+                            fetcher = get_fetcher_v4()
+                            result = cache.batch_backfill_returns(fetcher, market=market_code)
+                            st.success(
+                                f"回填完成: 总计{result['total']}条, "
+                                f"已填{result['filled']}条, 跳过{result['skipped']}条"
+                            )
+                            st.rerun()
+                        except Exception as bf_e:
+                            st.error(f"回填失败: {bf_e}")
 
     except Exception as e:
         st.error(f"信号日志加载失败: {e}")
@@ -2502,7 +2533,8 @@ def _render_data_driven_workbench(market_code: str, start_date: str):
                         else:
                             factor_report = st.session_state['factor_results']
                             weights = optimizer.optimize_icir(
-                                factor_report.factor_results, factor_names
+                                factor_report.factor_results, factor_names,
+                                correlation_matrix=factor_report.correlation_matrix,
                             )
                             opt_result = OptimizationResult(
                                 strategy_name=wo_strategy, method="ic_ir", weights=weights,
@@ -2833,10 +2865,24 @@ def _render_data_driven_workbench(market_code: str, start_date: str):
                 dist = signals.groupby(['strategy', 'action']).size().unstack(fill_value=0)
                 st.dataframe(dist, use_container_width=True)
 
-                # 待回填信号
+                # 待回填信号 + 回填按钮
                 pending = cache.get_pending_backfill_signals(market=market_code)
                 if not pending.empty:
-                    st.warning(f"有 {len(pending)} 条信号待收益回填")
+                    col_p1, col_p2 = st.columns([3, 1])
+                    with col_p1:
+                        st.warning(f"有 {len(pending)} 条信号待收益回填")
+                    with col_p2:
+                        if st.button("📊 回填收益", key="wb_backfill"):
+                            with st.spinner("正在回填信号收益..."):
+                                try:
+                                    fetcher = get_fetcher_v4()
+                                    result = cache.batch_backfill_returns(fetcher, market=market_code)
+                                    st.success(
+                                        f"回填完成: 已填{result['filled']}条, 跳过{result['skipped']}条"
+                                    )
+                                    st.rerun()
+                                except Exception as bf_e:
+                                    st.error(f"回填失败: {bf_e}")
 
         except Exception as e:
             st.warning(f"信号日志读取失败: {e}")
@@ -2853,17 +2899,45 @@ def _render_data_driven_workbench(market_code: str, start_date: str):
                 retrain_progress = st.progress(0)
 
                 try:
-                    # Step 2: 因子验证
-                    progress_text.text("Step 2/3: 因子验证中...")
+                    # === Train/Test隔离：自动留出最近6个月数据作为样本外测试集 ===
+                    from datetime import timedelta
+                    test_cutoff = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+                    train_dict = {}
+                    test_dict = {}
+                    for code, df in data_dict.items():
+                        if df.empty:
+                            continue
+                        # 确保索引可比较
+                        if isinstance(df.index, pd.DatetimeIndex):
+                            train_mask = df.index < pd.Timestamp(test_cutoff)
+                        else:
+                            train_mask = pd.Series([True] * len(df), index=df.index)
+                        train_df = df[train_mask]
+                        test_df = df[~train_mask]
+                        if len(train_df) >= 60:
+                            train_dict[code] = train_df
+                        if len(test_df) >= 5:
+                            test_dict[code] = test_df
+
+                    if not train_dict:
+                        train_dict = data_dict  # 降级：数据不足时用全量
+
+                    progress_text.text(
+                        f"数据切分完成: 训练集{len(train_dict)}只, 测试集{len(test_dict)}只 "
+                        f"(截止{test_cutoff})"
+                    )
+
+                    # Step 2: 因子验证（仅用训练集）
+                    progress_text.text("Step 2/4: 因子验证中（训练集）...")
                     retrain_progress.progress(0.1)
                     from src.factors.factor_validator import FactorValidator
                     validator = FactorValidator()
-                    factor_report = validator.validate(data_dict, min_stocks=min(20, max(5, len(data_dict) // 2)))
+                    factor_report = validator.validate(train_dict, min_stocks=min(20, max(5, len(train_dict) // 2)))
                     st.session_state['factor_results'] = factor_report
-                    retrain_progress.progress(0.33)
+                    retrain_progress.progress(0.25)
 
-                    # Step 3: 权重优化
-                    progress_text.text("Step 3/3: 权重优化中...")
+                    # Step 3: 权重优化（仅用训练集）
+                    progress_text.text("Step 3/4: 权重优化中（训练集）...")
                     from src.optimization.weight_optimizer import WeightOptimizer, OptimizationResult
                     optimizer = WeightOptimizer()
                     strategy = get_strategy(retrain_strategy)
@@ -2875,7 +2949,8 @@ def _render_data_driven_workbench(market_code: str, start_date: str):
                         ]
 
                     weights = optimizer.optimize_icir(
-                        factor_report.factor_results, factor_names
+                        factor_report.factor_results, factor_names,
+                        correlation_matrix=factor_report.correlation_matrix,
                     )
                     opt_result = OptimizationResult(
                         strategy_name=retrain_strategy,
@@ -2883,16 +2958,39 @@ def _render_data_driven_workbench(market_code: str, start_date: str):
                         weights=weights,
                     )
                     st.session_state['opt_result'] = {retrain_strategy: opt_result}
-                    retrain_progress.progress(0.66)
+                    retrain_progress.progress(0.5)
 
-                    # Step 4: 阈值网格搜索
-                    progress_text.text("Step 4/4: 阈值网格搜索中...")
+                    # Step 4: 阈值网格搜索（仅用训练集）
+                    progress_text.text("Step 4/4: 阈值网格搜索中（训练集）...")
                     from src.backtest.rule_backtester import RuleBacktester
                     backtester = RuleBacktester()
                     gs_results = backtester.grid_search_thresholds(
-                        data_dict, strategy,
+                        train_dict, strategy,
                         buy_range=(50, 80), sell_range=(20, 50), step=5.0,
                     )
+                    retrain_progress.progress(0.75)
+
+                    # === 样本外验证 ===
+                    oos_sharpe = None
+                    in_sample_sharpe = None
+                    if gs_results:
+                        best = max(gs_results, key=lambda r: r.sharpe)
+                        in_sample_sharpe = best.sharpe
+
+                        if test_dict:
+                            progress_text.text("样本外验证中...")
+                            # 用最优阈值在测试集上评估
+                            strategy.params['buy_threshold'] = best.buy_threshold
+                            strategy.params['sell_threshold'] = best.sell_threshold
+                            oos_results = backtester.grid_search_thresholds(
+                                test_dict, strategy,
+                                buy_range=(best.buy_threshold, best.buy_threshold),
+                                sell_range=(best.sell_threshold, best.sell_threshold),
+                                step=1.0,
+                            )
+                            if oos_results:
+                                oos_sharpe = oos_results[0].sharpe
+
                     retrain_progress.progress(0.9)
 
                     # 保存配置
@@ -2918,24 +3016,51 @@ def _render_data_driven_workbench(market_code: str, start_date: str):
 
                     # 保存再训练历史
                     _retrain_summary = f"策略={STRATEGY_NAMES[retrain_strategy]}, 权重+阈值已更新"
-                    if gs_results:
-                        _best_gs = max(gs_results, key=lambda r: r.sharpe)
-                        _retrain_summary += f", 最优夏普={_best_gs.sharpe:.3f}"
+                    if in_sample_sharpe is not None:
+                        _retrain_summary += f", 样本内夏普={in_sample_sharpe:.3f}"
+                    if oos_sharpe is not None:
+                        _retrain_summary += f", 样本外夏普={oos_sharpe:.3f}"
                     try:
                         _cache.save_training_history(
                             step="retrain",
                             market=market_code,
                             strategy=STRATEGY_NAMES.get(retrain_strategy, retrain_strategy),
-                            method="auto(IC_IR+grid_search)",
+                            method="auto(IC_IR+grid_search)+OOS验证",
                             stock_count=len(data_dict),
                             result_summary=_retrain_summary,
                         )
                     except Exception:
                         pass
 
+                    # 显示样本内/样本外对比
                     st.success(
-                        f"再训练完成! 策略 {STRATEGY_NAMES[retrain_strategy]} 的权重和阈值已更新到配置文件。"
+                        f"再训练完成! 策略 {STRATEGY_NAMES[retrain_strategy]} 的权重和阈值已更新。"
                     )
+                    if in_sample_sharpe is not None or oos_sharpe is not None:
+                        oos_col1, oos_col2, oos_col3 = st.columns(3)
+                        with oos_col1:
+                            st.metric("训练集股票数", len(train_dict))
+                        with oos_col2:
+                            if in_sample_sharpe is not None:
+                                st.metric("样本内夏普", f"{in_sample_sharpe:.3f}")
+                        with oos_col3:
+                            if oos_sharpe is not None:
+                                delta = oos_sharpe - in_sample_sharpe if in_sample_sharpe else 0
+                                st.metric("样本外夏普", f"{oos_sharpe:.3f}",
+                                          delta=f"{delta:+.3f}",
+                                          delta_color="normal")
+                            else:
+                                st.metric("样本外夏普", "测试集不足")
+
+                        if oos_sharpe is not None and in_sample_sharpe is not None:
+                            decay = 1 - oos_sharpe / in_sample_sharpe if in_sample_sharpe != 0 else 0
+                            if decay > 0.5:
+                                st.warning(f"样本外衰减{decay:.0%}，可能存在过拟合")
+                            elif decay > 0.3:
+                                st.info(f"样本外衰减{decay:.0%}，策略泛化能力一般")
+                            else:
+                                st.success(f"样本外衰减{decay:.0%}，策略泛化良好")
+
                     st.balloons()
 
                 except Exception as e:

@@ -79,6 +79,40 @@ ml:
     learning_rate: 0.05
     max_depth: 6
     
+# Grok AI 配置 (Phase 10.2)
+grok:
+  enabled: false
+  # API Key 从环境变量 XAI_API_KEY 读取
+  api_key_env: "XAI_API_KEY"
+  # 模型选择
+  models:
+    sentiment: "grok-3-mini"     # 批量情绪分析 (低成本)
+    analysis: "grok-4-1"         # 深度个股分析
+  # 缓存TTL (秒)
+  cache_ttl:
+    sentiment: 14400   # 个股情绪: 4小时
+    market: 3600       # 市场状态: 1小时
+    analysis: 86400    # 深度分析: 24小时
+  # 速率限制
+  rate_limit:
+    max_requests_per_minute: 30
+    max_daily_cost_usd: 5.0
+
+# 行研报告因子配置 (Phase 10.1)
+research:
+  enabled: true
+  cache_ttl: 86400    # 24小时缓存
+  # 因子权重上限
+  max_total_weight: 0.15  # 所有行研因子合计不超过15%
+
+# 市场状态识别配置 (Phase 10.2)
+market_regime:
+  # HMM模型参数
+  hmm:
+    enabled: true       # hmmlearn 未安装时自动降级
+    n_states: 4         # Bull/Bear/Sideways/Crisis
+    lookback: 120       # 训练窗口(交易日)
+
 # Web界面配置
 web:
   host: "0.0.0.0"
