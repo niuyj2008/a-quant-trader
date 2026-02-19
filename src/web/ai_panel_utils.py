@@ -117,36 +117,60 @@ def render_research_consensus_panel(research_data: Optional[Dict], code: str):
 
     # 评级分布
     if recommendations is not None and not recommendations.empty:
-        from src.factors.research_factors import RATING_MAP
+        try:
+            from src.factors.research_factors import RATING_MAP
 
-        # 统计评级分布
-        grades = recommendations['to_grade'].map(RATING_MAP).dropna()
-        if len(grades) > 0:
-            rating_dist = grades.value_counts().sort_index(ascending=False)
+            # 找到评级列 (可能是 'To Grade' 或 'to_grade')
+            grade_col = None
+            for col in ['To Grade', 'to_grade', 'toGrade']:
+                if col in recommendations.columns:
+                    grade_col = col
+                    break
 
-            # 映射到中文
-            rating_names = {5: '强力买入', 4: '买入', 3: '持有', 2: '减持', 1: '卖出'}
-            rating_dist.index = [rating_names.get(i, str(i)) for i in rating_dist.index]
+            if grade_col:
+                # 统计评级分布
+                grades = recommendations[grade_col].map(RATING_MAP).dropna()
+                if len(grades) > 0:
+                    rating_dist = grades.value_counts().sort_index(ascending=False)
 
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.bar_chart(rating_dist)
-            with col2:
-                avg_rating = grades.mean()
-                st.metric("平均评级", f"{avg_rating:.2f}/5")
-                st.metric("覆盖机构", len(recommendations['firm'].unique()))
+                    # 映射到中文
+                    rating_names = {5: '强力买入', 4: '买入', 3: '持有', 2: '减持', 1: '卖出'}
+                    rating_dist.index = [rating_names.get(i, str(i)) for i in rating_dist.index]
+
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.bar_chart(rating_dist)
+                    with col2:
+                        avg_rating = grades.mean()
+                        st.metric("平均评级", f"{avg_rating:.2f}/5")
+
+                        # 统计覆盖机构 (可能是 'Firm' 或 'firm')
+                        firm_col = 'Firm' if 'Firm' in recommendations.columns else 'firm'
+                        if firm_col in recommendations.columns:
+                            st.metric("覆盖机构", len(recommendations[firm_col].unique()))
+                else:
+                    st.caption("评级数据格式不支持")
+            else:
+                st.caption("未找到评级列")
+        except Exception as e:
+            st.caption(f"评级数据解析失败: {e}")
 
     # 目标价
     if price_targets:
         st.write("**一致目标价:**")
-        if isinstance(price_targets, dict):
-            for key, val in price_targets.items():
-                st.write(f"- {key}: {val}")
-        elif isinstance(price_targets, pd.DataFrame) and not price_targets.empty:
-            # 提取目标价范围
-            if 'targetMean' in price_targets.columns:
-                mean_target = price_targets['targetMean'].iloc[0]
-                st.metric("平均目标价", f"${mean_target:.2f}")
+        try:
+            if isinstance(price_targets, dict):
+                for key, val in price_targets.items():
+                    if val is not None:
+                        st.write(f"- {key}: ${val:.2f}" if isinstance(val, (int, float)) else f"- {key}: {val}")
+            elif isinstance(price_targets, pd.DataFrame) and not price_targets.empty:
+                # 提取目标价范围
+                if 'targetMean' in price_targets.columns:
+                    mean_target = price_targets['targetMean'].iloc[0]
+                    if mean_target and pd.notna(mean_target):
+                        st.metric("平均目标价", f"${mean_target:.2f}")
+        except Exception as e:
+            st.caption(f"目标价数据解析失败: {e}")
 
 
 def render_market_regime_panel(regime_info: Dict):
