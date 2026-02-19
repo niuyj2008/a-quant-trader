@@ -544,8 +544,10 @@ def render_stock_analysis(market_code, start_date):
                 except Exception as e:
                     logger.debug(f"智能推荐失败: {e}")
 
-            # === 三个子Tab ===
-            sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📋 策略信号", "📈 行情走势", "🔬 因子研究"])
+            # === 四个子Tab (Phase 10: 新增AI分析) ===
+            sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs([
+                "📋 策略信号", "📈 行情走势", "🔬 因子研究", "🤖 AI分析"
+            ])
 
             with sub_tab1:
                 _render_strategy_signals_panel(code, df, financial, selected_strategies, market_code)
@@ -555,6 +557,9 @@ def render_stock_analysis(market_code, start_date):
 
             with sub_tab3:
                 _render_factor_research_panel(code, df, financial, market_code, start_date)
+
+            with sub_tab4:
+                _render_ai_analysis_panel(code, df, financial, market_code, stock_name)
 
         except Exception as e:
             st.error(f"分析失败: {e}")
@@ -802,6 +807,168 @@ def _render_factor_research_panel(code, df, financial, market_code, start_date):
         st.error(f"因子研究失败: {e}")
         import traceback
         st.code(traceback.format_exc())
+
+
+def _render_ai_analysis_panel(code, df, financial, market_code, stock_name):
+    """AI分析子Tab — Phase 10新增功能集成面板"""
+    st.subheader("🤖 AI增强分析 (Phase 10)")
+    st.markdown("整合Grok AI、行研共识、HMM市场状态、行业轮动、智能风控、DL过滤器")
+
+    try:
+        from src.web.ai_panel_utils import (
+            render_grok_sentiment_panel,
+            render_research_consensus_panel,
+            render_market_regime_panel,
+            render_industry_rotation_panel,
+            render_dl_filter_status,
+            render_risk_panel
+        )
+
+        # 1. 获取Grok AI数据 (可选，取决于配置)
+        grok_data = None
+        try:
+            from src.external.grok_client import GrokClient
+            grok_client = GrokClient()
+            if grok_client.is_available():
+                with st.spinner("🤖 Grok AI分析中..."):
+                    grok_sentiment = grok_client.analyze_stock_sentiment(code, market_code)
+                    grok_market = grok_client.analyze_market_regime(market_code)
+                    if grok_sentiment or grok_market:
+                        grok_data = {
+                            'sentiment': grok_sentiment,
+                            'market': grok_market
+                        }
+        except Exception as e:
+            st.caption(f"Grok AI未启用或不可用: {e}")
+
+        # 渲染Grok面板
+        render_grok_sentiment_panel(grok_data)
+        st.markdown("---")
+
+        # 2. 行研报告共识
+        research_data = None
+        try:
+            fetcher = get_fetcher_v4()
+            research_data = fetcher.get_research_data(code, market_code)
+        except Exception as e:
+            logger.debug(f"获取行研数据失败: {e}")
+
+        render_research_consensus_panel(research_data, code)
+        st.markdown("---")
+
+        # 3. HMM市场状态识别
+        regime_info = None
+        try:
+            from src.factors.macro_factors import MarketRegimeHMM
+            detector = MarketRegimeHMM()
+
+            # 获取指数数据
+            index_code = "000300" if market_code == "CN" else "^GSPC"
+            index_df = fetch_stock_data(index_code,
+                                       (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'),
+                                       market_code)
+
+            if not index_df.empty:
+                regime, confidence, description = detector.detect_regime(index_df)
+                regime_info = {
+                    'regime': regime,
+                    'confidence': confidence,
+                    'description': description
+                }
+        except Exception as e:
+            logger.debug(f"HMM市场状态识别失败: {e}")
+
+        if regime_info:
+            render_market_regime_panel(regime_info)
+            st.markdown("---")
+
+        # 4. 行业轮动
+        industry_scores = None
+        try:
+            from src.factors.industry_factors import IndustryRotationFactor
+            industry_factor = IndustryRotationFactor()
+            industry_scores = industry_factor.compute_industry_scores(market_code, lookback_days=20)
+        except Exception as e:
+            logger.debug(f"行业轮动分析失败: {e}")
+
+        if industry_scores:
+            render_industry_rotation_panel(industry_scores, top_n=10)
+            st.markdown("---")
+
+        # 5. DL信号过滤器状态
+        try:
+            from src.models.dl_signal_filter import DLSignalFilter
+            dl_filter = DLSignalFilter()
+            dl_info = dl_filter.get_model_info()
+            render_dl_filter_status(dl_info)
+            st.markdown("---")
+        except Exception as e:
+            logger.debug(f"DL过滤器状态获取失败: {e}")
+
+        # 6. 智能风控面板
+        risk_alerts = []
+        atr_info = None
+        correlation_warnings = None
+        black_swan = None
+
+        try:
+            from src.trading.risk import ATRStopLoss, BlackSwanDetector
+
+            # ATR止损信息
+            atr_stop = ATRStopLoss()
+            current_price = df.iloc[-1]['close']
+            atr_info = atr_stop.get_stop_info(df, current_price)
+
+            # 黑天鹅检测 (使用指数数据)
+            index_code = "000300" if market_code == "CN" else "^GSPC"
+            try:
+                index_df = fetch_stock_data(index_code,
+                                           (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'),
+                                           market_code)
+                if not index_df.empty:
+                    detector = BlackSwanDetector()
+                    black_swan = detector.check(index_df)
+            except:
+                pass
+
+            # 基础风险告警
+            if financial:
+                pe = financial.get('pe')
+                if pe and pe > 50:
+                    risk_alerts.append(f"⚠️ 市盈率过高 (PE={pe:.1f})")
+                if pe and pe < 0:
+                    risk_alerts.append(f"⚠️ 公司亏损 (PE={pe:.1f})")
+
+            render_risk_panel(risk_alerts, atr_info, correlation_warnings, black_swan)
+
+        except Exception as e:
+            logger.debug(f"智能风控面板渲染失败: {e}")
+
+        # 提示信息
+        st.markdown("---")
+        st.info("""
+        💡 **如何启用完整AI功能**:
+
+        1. **Grok AI分析**:
+           - 获取xAI API Key: https://console.x.ai/
+           - 设置环境变量: `export XAI_API_KEY="xai-xxxxx"`
+           - 修改 `config/settings.yaml` 中 `grok.enabled: true`
+
+        2. **行研报告**: 美股自动启用(yfinance)，A股使用AKShare免费数据
+
+        3. **HMM/行业轮动/智能风控**: 已自动启用，基于免费数据源
+
+        4. **DL信号过滤**: 需要先在"策略实验室"中训练LSTM/Transformer模型
+        """)
+
+    except ImportError as e:
+        st.error(f"AI分析模块导入失败: {e}")
+        st.info("请确认已安装Phase 10相关依赖")
+    except Exception as e:
+        st.error(f"AI分析面板渲染失败: {e}")
+        import traceback
+        with st.expander("查看错误详情"):
+            st.code(traceback.format_exc())
 
 
 # ==================== Tab B: 持仓管理（合并原Tab2+Tab7） ====================
